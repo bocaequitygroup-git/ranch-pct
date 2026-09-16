@@ -500,26 +500,27 @@ function harvestWindowDays(pattern){
 
 function getStage(c, asOf){
   if(!c.dob) return 'no-schedule';
-  const plantEvt = c.method === 'GH-PROP' ? c.gh_prop_start : c.dob;
-  if(asOf < plantEvt) return 'planned';
-  if(c.method === 'GH-PROP' && asOf < c.field_date) return 'ghprop';
+  // DOB is the planting date for every method (GH-PROP transplant or direct
+  // seed alike) — GH-PROP's own nursery schedule runs before DOB but is a
+  // separate track and doesn't get a stage on the planting calendar.
+  if(asOf < c.dob) return 'planned';
   if(!c.harvest_ready) return 'growing';
   if(asOf < c.harvest_ready) return 'growing';
   const hEnd = addDays(c.harvest_ready, harvestWindowDays(c.pattern));
   if(asOf <= hEnd) return 'harvesting';
   return 'complete';
 }
-const STAGE_LABEL = { 'planned':'Planned','ghprop':'GH-PROP','growing':'Growing','harvesting':'Harvesting','complete':'Complete','no-schedule':'Unscheduled' };
+const STAGE_LABEL = { 'planned':'Planned','growing':'Growing','harvesting':'Harvesting','complete':'Complete','no-schedule':'Unscheduled' };
 
 // ============ EVENTS (flattened for calendar) ============
 function buildEvents(){
   const events = [];
   COHORTS.forEach(c => {
     if(!c.dob) return;
+    // DOB is the planting date for every method — GH-PROP's transplant IS
+    // this event, not a separate later one, so there's only ever one plant
+    // event per cohort on the calendar.
     events.push({ date: c.dob, type:'plant', sub: c.method==='GH-PROP'?'ghprop':'direct', cohort: c });
-    if(c.method === 'GH-PROP' && c.field_date && c.field_date !== c.dob){
-      events.push({ date: c.field_date, type:'transplant', sub:'', cohort: c });
-    }
     if(c.harvest_ready){
       events.push({ date: c.harvest_ready, type:'harvest', sub:'', cohort: c });
     }
@@ -664,7 +665,7 @@ function renderPipelineTable(){
 
   const cols = [
     ['crop','Crop'], ['wave','Wave'], ['dob','DOB'], ['method','Method'],
-    ['field_date','Field Date'], ['harvest_ready','Harvest Ready'], ['daysToHarvest','Days to Harvest'], ['stage','Stage']
+    ['harvest_ready','Harvest Ready'], ['daysToHarvest','Days to Harvest'], ['stage','Stage']
   ];
   document.getElementById('pipelineTableWrap').innerHTML = `
     <div style="max-height:420px; overflow:auto;">
@@ -677,7 +678,6 @@ function renderPipelineTable(){
             <td class="mono">${r.crop_id}-W${r.wave}</td>
             <td class="mono">${fmtShort(r.dob)}</td>
             <td>${methodBadge(r.method)}</td>
-            <td class="mono">${fmtShort(r.field_date)}</td>
             <td class="mono">${fmtShort(r.harvest_ready)}</td>
             <td class="mono">${r.daysToHarvest===null?'—':(r.daysToHarvest<0?'past':r.daysToHarvest)}</td>
             <td>${stageBadge(r.stage)}</td>
@@ -938,15 +938,13 @@ function openCropDetail(cropId){
 
       <table>
         <thead><tr>
-          <th>Wave</th><th>DOB</th><th>GH-PROP Start</th><th>Field Transplant</th><th>Harvest Ready</th><th>Window</th><th>Status</th>
+          <th>Wave</th><th>DOB (Planting Date)</th><th>Harvest Ready</th><th>Window</th><th>Status</th>
         </tr></thead>
         <tbody>
           ${rows.map(r => `
             <tr class="rowlink" data-key="${r.key}">
               <td class="mono">${r.crop_id}-W${r.wave}</td>
               <td class="mono">${fmtShort(r.dob)}</td>
-              <td class="mono">${fmtShort(r.gh_prop_start)}</td>
-              <td class="mono">${fmtShort(r.field_date)}</td>
               <td class="mono">${fmtShort(r.harvest_ready)}</td>
               <td>${windowBadge(r.window_check)}</td>
               <td>${stageBadge(getStage(r, state.asOf))}</td>
@@ -973,12 +971,7 @@ function renderCropMiniTimeline(rows, spanStart, totalSpan){
   document.getElementById('cropTimelineWrap').innerHTML = withDob.map(r => {
     const barStart = daysBetween(spanStartISO, r.dob);
     let segments = '';
-    if(r.method === 'GH-PROP' && r.field_date){
-      const ghLen = daysBetween(r.dob, r.field_date);
-      const fieldLen = r.harvest_ready ? daysBetween(r.field_date, r.harvest_ready) : 0;
-      segments += `<div class="timeline-bar gh" style="left:${pct(barStart,totalSpan)}%; width:${pct(ghLen,totalSpan)}%;"></div>`;
-      segments += `<div class="timeline-bar field" style="left:${pct(barStart+ghLen,totalSpan)}%; width:${pct(fieldLen,totalSpan)}%;"></div>`;
-    } else if(r.harvest_ready){
+    if(r.harvest_ready){
       const fieldLen = daysBetween(r.dob, r.harvest_ready);
       segments += `<div class="timeline-bar field" style="left:${pct(barStart,totalSpan)}%; width:${pct(fieldLen,totalSpan)}%;"></div>`;
     }
@@ -999,17 +992,13 @@ function openCohortModal(key){
   const backdrop = document.getElementById('modalBackdrop');
   const body = document.getElementById('modalBody');
 
+  // This is a PLANTING event card. DOB is the planting date (field transplant
+  // for GH-PROP crops, direct-seed date for DIRECT/SLIP) and harvest is
+  // DOB + maturity — full stop. GH-PROP's nursery schedule (germination,
+  // nursery, hardening) is a separate pre-planting track and does not
+  // belong on this card; it lives in its own GH-PROP/nursery workflow.
   let milestones = [];
-  milestones.push(['DOB (driving date)', fmtLong(c.dob)]);
-  if(c.method === 'GH-PROP'){
-    milestones.push(['Germination Complete', fmtLong(c.germ_complete)]);
-    milestones.push(['Nursery Complete', fmtLong(c.nursery_complete)]);
-    milestones.push(['Hardening Start', fmtLong(c.harden_start)]);
-    milestones.push(['Hardening Complete', fmtLong(c.harden_complete)]);
-    milestones.push(['Field Transplant', fmtLong(c.field_date)]);
-  } else {
-    milestones.push(['Field Plant Date', fmtLong(c.field_date)]);
-  }
+  milestones.push(['DOB (Driving Date)', fmtLong(c.dob)]);
   milestones.push(['Harvest Ready', fmtLong(c.harvest_ready)]);
 
   body.innerHTML = `
@@ -1037,7 +1026,7 @@ function openCohortModal(key){
       <div class="field"><div class="k">DOB TYPE</div><div class="v" style="font-size:12.5px;">${c.dob_type}</div></div>
       <div class="field"><div class="k">OREGON WINDOW CHECK</div><div class="v">${windowBadge(c.window_check)}</div></div>
       <div class="field"><div class="k">CURRENT STAGE</div><div class="v">${stageBadge(getStage(c, state.asOf))}</div></div>
-      <div class="field"><div class="k">DAYS TO FIRST HARVEST</div><div class="v">${c.days_to_harvest} days from field date</div></div>
+      <div class="field"><div class="k">DAYS TO FIRST HARVEST</div><div class="v">${c.days_to_harvest} days from DOB</div></div>
     </div>
     <table class="milestone-table">
       <tbody>
