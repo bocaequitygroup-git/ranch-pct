@@ -578,15 +578,15 @@ function renderDashboard(){
 
   el.innerHTML = `
     <div class="kpi-grid">
-      ${kpiCell(k.activeCrops,'Active Crops','')}
-      ${kpiCell(k.totalCohorts,'Active Cohorts / Waves','')}
-      ${kpiCell(k.fieldCohorts,'Field Cohorts','')}
-      ${kpiCell(k.ghCohorts,'GH-PROP Cohorts','info')}
-      ${kpiCell(k.harvestingNow,'Harvesting Now','good')}
-      ${kpiCell(k.ready7,'Harvest Ready ≤ 7 Days','warn')}
-      ${kpiCell(k.ready14,'Harvest Ready 8–14 Days','')}
-      ${kpiCell(k.outsideWindow,'Waves Outside Window','alert')}
-      ${kpiCell(k.missingWindow,'Crops Missing Oregon Data','warn')}
+      ${kpiCell(k.activeCrops,'Active Crops','','activeCrops')}
+      ${kpiCell(k.totalCohorts,'Active Cohorts / Waves','','totalCohorts')}
+      ${kpiCell(k.fieldCohorts,'Field Cohorts','','fieldCohorts')}
+      ${kpiCell(k.ghCohorts,'GH-PROP Cohorts','info','ghCohorts')}
+      ${kpiCell(k.harvestingNow,'Harvesting Now','good','harvestingNow')}
+      ${kpiCell(k.ready7,'Harvest Ready ≤ 7 Days','warn','ready7')}
+      ${kpiCell(k.ready14,'Harvest Ready 8–14 Days','','ready14')}
+      ${kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow')}
+      ${kpiCell(k.missingWindow,'Crops Missing Oregon Data','warn','missingWindow')}
     </div>
 
     <div class="panel">
@@ -616,10 +616,105 @@ function renderDashboard(){
   renderTodayPanel();
   renderPipelineTable();
   renderDashboardAlertPreview(alerts);
+  el_delegate(document.querySelector('.kpi-grid'), '.kpi', el => openKpiModal(el.dataset.kpi));
 }
 
-function kpiCell(n, label, cls){
-  return `<div class="kpi ${cls||''}"><div class="n">${n}</div><div class="l">${label}</div></div>`;
+function kpiCell(n, label, cls, key){
+  return `<div class="kpi ${cls||''}" data-kpi="${key}"><div class="n">${n}</div><div class="l">${label}</div></div>`;
+}
+
+// Drill-down: which cohorts/crops make up a given KPI number, as of the
+// current viewing date. Mirrors computeKPIs()'s own filters exactly so the
+// list always matches the count shown on the tile.
+function kpiDrilldown_(key, asOf){
+  const scheduled = COHORTS.filter(c=>c.dob);
+  switch(key){
+    case 'activeCrops':
+      return { type:'crops', title:'Active Crops',
+        items: Array.from(new Set(scheduled.map(c=>c.crop_id))).map(id=>cropById[id]).filter(Boolean) };
+    case 'totalCohorts':
+      return { type:'cohorts', title:'Active Cohorts / Waves', items: scheduled };
+    case 'fieldCohorts':
+      return { type:'cohorts', title:'Field Cohorts', items: scheduled.filter(c=>c.method!=='GH-PROP') };
+    case 'ghCohorts':
+      return { type:'cohorts', title:'GH-PROP Cohorts', items: scheduled.filter(c=>c.method==='GH-PROP') };
+    case 'harvestingNow':
+      return { type:'cohorts', title:'Harvesting Now', items: scheduled.filter(c=>getStage(c,asOf)==='harvesting') };
+    case 'ready7':
+      return { type:'cohorts', title:'Harvest Ready ≤ 7 Days',
+        items: scheduled.filter(c=>c.harvest_ready && c.harvest_ready>asOf && daysBetween(asOf,c.harvest_ready)<=7) };
+    case 'ready14':
+      return { type:'cohorts', title:'Harvest Ready 8–14 Days',
+        items: scheduled.filter(c=>c.harvest_ready && daysBetween(asOf,c.harvest_ready)>7 && daysBetween(asOf,c.harvest_ready)<=14) };
+    case 'outsideWindow':
+      return { type:'cohorts', title:'Waves Outside Window', items: scheduled.filter(c=>c.window_check==='OUTSIDE WINDOW') };
+    case 'missingWindow':
+      return { type:'crops', title:'Crops Missing Oregon Data', items: CROPS.filter(c=>!c.has_window) };
+    default:
+      return null;
+  }
+}
+
+function openKpiModal(key){
+  const cfg = kpiDrilldown_(key, state.asOf);
+  if(!cfg) return;
+  const backdrop = document.getElementById('modalBackdrop');
+  const body = document.getElementById('modalBody');
+  const n = cfg.items.length;
+
+  let rowsHtml;
+  if(cfg.type === 'cohorts'){
+    rowsHtml = n ? `
+      <table>
+        <thead><tr><th>Crop</th><th>Wave</th><th>DOB</th><th>Method</th><th>Harvest Ready</th><th>Window</th><th>Stage</th></tr></thead>
+        <tbody>
+          ${cfg.items.map(c => `
+            <tr class="rowlink" data-key="${c.key}">
+              <td>${c.crop}</td>
+              <td class="mono">${c.crop_id}-W${c.wave}</td>
+              <td class="mono">${fmtShort(c.dob)}</td>
+              <td>${methodBadge(c.method)}</td>
+              <td class="mono">${fmtShort(c.harvest_ready)}</td>
+              <td>${windowBadge(c.window_check)}</td>
+              <td>${stageBadge(getStage(c, state.asOf))}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : `<div class="note">No cohorts currently match this KPI.</div>`;
+  } else {
+    rowsHtml = n ? `
+      <table>
+        <thead><tr><th>Crop</th><th>Group</th><th>Method</th><th>Oregon Window</th></tr></thead>
+        <tbody>
+          ${cfg.items.map(c => `
+            <tr class="rowlink" data-crop="${c.crop_id}">
+              <td>${c.crop}</td>
+              <td>${c.group}</td>
+              <td>${methodBadge(c.method)}</td>
+              <td>${c.window_label || '—'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : `<div class="note">No crops currently match this KPI.</div>`;
+  }
+
+  body.innerHTML = `
+    <div class="modal-head">
+      <div><h2>${cfg.title}</h2></div>
+      <div class="x" id="modalClose">&times;</div>
+    </div>
+    <div class="modal-sub">${n} matching ${cfg.type === 'cohorts' ? (n===1?'wave':'waves') : (n===1?'crop':'crops')} · as of ${fmtLong(state.asOf)}</div>
+    <div style="max-height:420px; overflow:auto; margin-top:12px;">${rowsHtml}</div>
+  `;
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  if(cfg.type === 'cohorts'){
+    el_delegate(body, 'tr.rowlink', el => openCohortModal(el.dataset.key));
+  } else {
+    el_delegate(body, 'tr.rowlink', el => { closeModal(); openCropDetail(el.dataset.crop); });
+  }
+  backdrop.classList.add('open');
 }
 
 function renderTodayPanel(){
