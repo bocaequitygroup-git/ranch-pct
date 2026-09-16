@@ -306,6 +306,22 @@
   .milestone-table td:last-child{ font-family: var(--mono); text-align:right; font-weight:600; }
   .note{ font-size:11.5px; color: var(--text-faint); margin-top:14px; border-top:1px solid var(--line-soft); padding-top:12px; }
 
+  /* ---------- CROP PROFILE SECTIONS (inside cohort modal) ---------- */
+  .profile-section{ margin-bottom:18px; }
+  .profile-section .sec-title{
+    font-family: var(--mono); font-size:10px; letter-spacing:.1em; color: var(--text-faint);
+    padding-bottom:6px; margin-bottom:10px; border-bottom:1px solid var(--line-soft);
+  }
+  .wave-table{ width:100%; border-collapse:collapse; font-size:11.5px; margin-top:4px; }
+  .wave-table th{
+    text-align:left; font-family: var(--mono); font-size:9.5px; letter-spacing:.04em;
+    color: var(--text-faint); font-weight:600; padding:5px 8px; border-bottom:1px solid var(--line);
+    white-space:nowrap;
+  }
+  .wave-table td{ padding:5px 8px; border-bottom:1px solid var(--line-soft); font-family: var(--mono); white-space:nowrap; }
+  .wave-table tr.current-wave td{ background: rgba(111,191,106,0.10); color: var(--text); font-weight:600; }
+  .wave-table tr.current-wave td:first-child{ border-left:2px solid var(--green); }
+
   .empty{ padding: 30px; text-align:center; color: var(--text-faint); font-family: var(--mono); font-size:12px;}
   ::-webkit-scrollbar{ width:9px; height:9px; }
   ::-webkit-scrollbar-thumb{ background: var(--line); border-radius:5px; }
@@ -1084,6 +1100,7 @@ function pct(v, total){ return Math.max(0, Math.min(100, (v/total)*100)); }
 function openCohortModal(key){
   const c = cohortByKey[key];
   if(!c) return;
+  const crop = cropById[c.crop_id];
   const backdrop = document.getElementById('modalBackdrop');
   const body = document.getElementById('modalBody');
 
@@ -1096,6 +1113,27 @@ function openCohortModal(key){
   milestones.push(['DOB (Driving Date)', fmtLong(c.dob)]);
   milestones.push(['Harvest Ready', fmtLong(c.harvest_ready)]);
 
+  // Full wave-execution table for this crop, every wave, current one highlighted —
+  // mirrors CROP_PROFILE_DASHBOARD Section 4.
+  const cropWaves = COHORTS
+    .filter(w => w.crop_id === c.crop_id)
+    .slice()
+    .sort((a,b) => a.wave - b.wave);
+  const waveRows = cropWaves.map(w => {
+    const harvestStatus = w.window_check === 'IN WINDOW' ? 'Valid Harvest'
+      : (w.window_check ? 'Out of Window / Invalid' : '—');
+    return `
+      <tr class="${w.wave === c.wave ? 'current-wave' : ''}">
+        <td>${w.wave}</td>
+        <td>${fmtShort(w.dob)}</td>
+        <td>${fmtShort(w.gh_prop_start)}</td>
+        <td>${fmtShort(w.field_date)}</td>
+        <td>${fmtShort(w.harvest_ready)}</td>
+        <td>${w.window_check || '—'}</td>
+        <td>${harvestStatus}</td>
+      </tr>`;
+  }).join('');
+
   body.innerHTML = `
     <div class="modal-head">
       <div>
@@ -1104,6 +1142,42 @@ function openCohortModal(key){
       <div class="x" id="modalClose">&times;</div>
     </div>
     <div class="modal-sub">${c.group} · ${METHOD_LABEL[c.method]||c.method}</div>
+
+    <div class="profile-section">
+      <div class="sec-title">SECTION 1 — CORE IDENTIFICATION &amp; STRATEGY</div>
+      <div class="modal-fields">
+        <div class="field"><div class="k">CROP ID</div><div class="v">${c.crop_id}</div></div>
+        <div class="field"><div class="k">PRODUCTION METHOD</div><div class="v">${METHOD_LABEL[c.method]||c.method}</div></div>
+        <div class="field"><div class="k">CROP NAME</div><div class="v">${c.crop}</div></div>
+        <div class="field"><div class="k">CONTINUITY METHOD</div><div class="v">${crop.continuity_method || '—'}</div></div>
+        <div class="field"><div class="k">CROP GROUP</div><div class="v">${c.group}</div></div>
+        <div class="field"><div class="k">DATA STATUS</div><div class="v" style="font-size:12px;font-weight:500;">${c.data_status || '—'}</div></div>
+      </div>
+    </div>
+
+    <div class="profile-section">
+      <div class="sec-title">SECTION 2 — SEASONALITY &amp; ALLOWABLE FIELD BOUNDARIES</div>
+      <div class="modal-fields">
+        <div class="field" style="grid-column:1 / -1;"><div class="k">ALLOWABLE FIELD WINDOW</div><div class="v" style="font-size:12.5px;">${c.window_label || '—'}</div></div>
+        <div class="field"><div class="k">WINDOW START</div><div class="v">${fmtLong(crop.window_start)}</div></div>
+        <div class="field"><div class="k">WINDOW END</div><div class="v">${fmtLong(crop.window_end)}</div></div>
+        <div class="field"><div class="k">SUCCESSION INTERVAL</div><div class="v">${crop.succession_interval != null ? crop.succession_interval + ' days' : '—'}</div></div>
+      </div>
+    </div>
+
+    <div class="profile-section">
+      <div class="sec-title">SECTION 3 — LIFECYCLE TIMELINE &amp; STAGE DURATIONS</div>
+      <div class="modal-fields">
+        <div class="field"><div class="k">GERMINATION DAYS</div><div class="v">${crop.germ_days}</div></div>
+        <div class="field"><div class="k">PRE-FIELD PROPAGATION TOTAL</div><div class="v">${crop.pre_field_days}</div></div>
+        <div class="field"><div class="k">NURSERY DAYS</div><div class="v">${crop.nursery_days}</div></div>
+        <div class="field"><div class="k">DAYS TO FIRST HARVEST</div><div class="v">${crop.days_to_harvest}</div></div>
+        <div class="field"><div class="k">HARDENING DAYS</div><div class="v">${crop.harden_days}</div></div>
+        <div class="field"><div class="k">TOTAL FIELD DURATION</div><div class="v">${crop.total_field_duration != null ? crop.total_field_duration : '—'}</div></div>
+        <div class="field"><div class="k">ESTABLISHMENT DAYS</div><div class="v">${crop.establish_days}</div></div>
+        <div class="field"><div class="k">HARVEST PATTERN</div><div class="v">${c.pattern || '—'}</div></div>
+      </div>
+    </div>
 
     <div class="dob-editor">
       <div class="lbl">EDIT DOB (DRIVING DATE) — WRITES LIVE TO THE GOOGLE SHEET</div>
@@ -1129,6 +1203,21 @@ function openCohortModal(key){
       </tbody>
     </table>
     <div class="note">Location and planted quantity are operational fields to be assigned by the manager once this cohort is scheduled — they are not part of the source engine data. DOB is the driving variable: every date above recalculates automatically if DOB changes.</div>
+
+    <div class="profile-section" style="margin-top:18px;">
+      <div class="sec-title">SECTION 4 — WAVE EXECUTION TABLE (ALL WAVES, ${c.crop_id})</div>
+      <div style="overflow-x:auto;">
+        <table class="wave-table">
+          <thead>
+            <tr>
+              <th>WAVE</th><th>DOB (FIELD)</th><th>GH-PROP START</th><th>FIELD PLANTING</th>
+              <th>HARVEST READY</th><th>WINDOW CHECK</th><th>HARVEST STATUS</th>
+            </tr>
+          </thead>
+          <tbody>${waveRows}</tbody>
+        </table>
+      </div>
+    </div>
   `;
   document.getElementById('modalClose').addEventListener('click', closeModal);
   document.getElementById('dobSaveBtn').addEventListener('click', () => saveDob_(key, document.getElementById('dobEditInput').value));
