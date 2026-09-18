@@ -513,6 +513,16 @@ function harvestWindowDays(pattern){
 
 function getStage(c, asOf){
   if(!c.dob) return 'no-schedule';
+  // COHORT_PRODUCTION rows are proposed waves, not live plantings -- a wave
+  // only becomes a real planting once dispatched into COHORT_MASTER (see
+  // ControlTowerAPI.gs header). So for VPOS-sourced cohorts (anything
+  // carrying pipeline_status), the real Pipeline_Status governs the stage
+  // shown, regardless of where the viewing date falls relative to the
+  // proposed DOB: PLANNED always reads as "planned", never "growing" just
+  // because its date has passed on the calendar. CURRENT_STARTUP is the
+  // one status VPOS uses for a wave that's actually already underway, so
+  // it falls through to the normal date-based math below.
+  if(c.pipeline_status === 'PLANNED') return 'planned';
   // DOB is the planting date for every method (GH-PROP transplant or direct
   // seed alike) — GH-PROP's own nursery schedule runs before DOB but is a
   // separate track and doesn't get a stage on the planting calendar.
