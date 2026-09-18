@@ -431,25 +431,22 @@
 
 <script>
 // ============ LIVE BACKEND CONFIG ============
-// Paste the /exec URL from your Apps Script deployment (Deploy > New deployment > Web app) here.
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwqRw9KHYM622DmpIFUXOgsPP5f25hm5x7Vqx-WgWtnuzgqXLFk7glPGQniVvWALqVXpA/exec';
+// Rewired 2026-09-18: this used to be its own separate Apps Script
+// deployment (a "DOB Engine" workbook with its own GET-based /exec
+// contract). It now reads from Ranch_Vegetable_VPOS_MASTER_v2026 through
+// the SAME Code_main.gs deployment workerapp.html/manager_dashboard.html
+// use -- see ControlTowerAPI.gs for the tab mapping and get-control-tower-data
+// / update-control-tower-dob for the two actions this file calls.
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwUFXoHDFSUArQCIqkh2De8-fwPfWSG9LRvtagJPzmJdFaBx_95av5V57NzYs1J1IZLnA/exec';
 
-// GET is used for reads. Plain fetch to an Apps Script web app works
-// cross-origin with no special headers needed.
-async function apiGet(action, params) {
-  const qs = new URLSearchParams(Object.assign({ action }, params || {})).toString();
-  const res = await fetch(APPS_SCRIPT_URL + '?' + qs, { method: 'GET' });
-  if (!res.ok) throw new Error('Network error (' + res.status + ') calling ' + action);
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error || ('Request failed: ' + action));
-  return json.data;
-}
-
-// POST is used for writes. Content-Type is deliberately text/plain so the
-// browser treats this as a CORS "simple request" (no preflight OPTIONS) —
-// Apps Script web apps don't handle OPTIONS, so application/json here would
-// break cross-origin calls. The backend still parses the body as JSON.
-async function apiPost(action, payload) {
+// POST only, matching Code_main.gs's doPost -- it has no doGet query-action
+// router. Content-Type is deliberately text/plain so the browser treats this
+// as a CORS "simple request" (no preflight OPTIONS) -- Apps Script web apps
+// don't handle OPTIONS, so application/json here would break cross-origin
+// calls. The backend still parses the body as JSON. Response envelope is
+// {success, error, ...named fields} (not {ok, data}), so callers read
+// fields directly off the resolved object rather than off a nested .data.
+async function api(action, payload) {
   const res = await fetch(APPS_SCRIPT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -457,8 +454,8 @@ async function apiPost(action, payload) {
   });
   if (!res.ok) throw new Error('Network error (' + res.status + ') calling ' + action);
   const json = await res.json();
-  if (!json.ok) throw new Error(json.error || ('Request failed: ' + action));
-  return json.data;
+  if (!json.success) throw new Error(json.error || ('Request failed: ' + action));
+  return json;
 }
 
 // ============ DATA (loaded live from the Google Sheet — see boot()) ============
@@ -1237,7 +1234,7 @@ async function saveDob_(key, newDob){
   saveBtn.disabled = true; clearBtn.disabled = true;
   statusEl.className = 'status'; statusEl.textContent = 'saving…';
   try{
-    const result = await apiPost('updateDob', { crop_id: c.crop_id, wave: c.wave, dob: newDob || null });
+    const result = await api('update-control-tower-dob', { crop_id: c.crop_id, wave: c.wave, dob: newDob || null });
     // merge the updated cohort(s) for this crop back into local arrays
     (result.cohorts || [result.cohort]).forEach(updated => {
       if(!updated) return;
@@ -1306,14 +1303,8 @@ async function boot(){
   const overlay = document.getElementById('loadingOverlay');
   overlay.style.display = 'flex';
   hideError();
-  if(APPS_SCRIPT_URL.indexOf('PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE') !== -1){
-    document.getElementById('loadingMsg').textContent = 'NOT CONFIGURED';
-    showError('APPS_SCRIPT_URL is still a placeholder. Paste your deployed Apps Script /exec URL near the top of the <script> block in this file.');
-    overlay.style.display = 'none';
-    return;
-  }
   try{
-    const data = await apiGet('bootstrap');
+    const data = await api('get-control-tower-data');
     applyDataset(data);
     const isFirstLoad = !document.getElementById('view-dashboard').dataset.booted;
     if(isFirstLoad){
@@ -1340,7 +1331,7 @@ async function refreshData(){
   btn.classList.add('syncing');
   hideError();
   try{
-    const data = await apiGet('bootstrap');
+    const data = await api('get-control-tower-data');
     applyDataset(data);
     setSyncStatus('ok', 'synced ' + new Date().toLocaleTimeString());
     renderAll();
