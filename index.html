@@ -1244,7 +1244,7 @@ async function saveDob_(key, newDob){
   saveBtn.disabled = true; clearBtn.disabled = true;
   statusEl.className = 'status'; statusEl.textContent = 'saving…';
   try{
-    const result = await api('update-control-tower-dob', { crop_id: c.crop_id, wave: c.wave, dob: newDob || null });
+    const result = await api('update-control-tower-dob', { crop_id: c.crop_id, wave: c.wave, cohort_id: c.cohort_id, dob: newDob || null });
     // merge the updated cohort(s) for this crop back into local arrays
     (result.cohorts || [result.cohort]).forEach(updated => {
       if(!updated) return;
