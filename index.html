@@ -645,10 +645,9 @@ function startOverdue(c, asOf){ return !!c.dob && c.pipeline_status === 'PLANNED
 
 // Production-health class for a scheduled FIELD wave. Display and validation are separate: every
 // class stays on the calendar; this only decides which health bucket a wave is COUNTED in.
-// Each wave lands in exactly one bucket (precedence: DATE_REVIEW, OUTSIDE_WINDOW, CONFLICT, MISSING_DATA, VALID),
+// Each wave lands in exactly one bucket (precedence: OUTSIDE_WINDOW, CONFLICT, MISSING_DATA, VALID),
 // so the four always add up to the scheduled total.
 function fieldWaveClass(c){
-  if(suspectDob(c)) return 'DATE_REVIEW';
   if(c.window_check === 'OUTSIDE WINDOW' || c.window_eval === 'OUTSIDE_WINDOW') return 'OUTSIDE_WINDOW';
   if(c.window_eval === 'GREENHOUSE_ONLY' || prodAnomaly(c)) return 'CONFLICT';
   if(c.window_eval === 'NO_WINDOW' || c.window_eval === 'WINDOW_UNPARSEABLE') return 'MISSING_DATA';
@@ -675,7 +674,8 @@ function computeKPIs(asOf){
   const outsideCrops = new Set(outsideWaves.map(c=>c.crop_id)).size;
   const recon = windowRecon(scheduled);
   const facilityChecks = scheduled.filter(c => prodAnomaly(c)).length;
-  const waveClass = { VALID:0, DATE_REVIEW:0, OUTSIDE_WINDOW:0, CONFLICT:0, MISSING_DATA:0 };
+  const waveClass = { VALID:0, OUTSIDE_WINDOW:0, CONFLICT:0, MISSING_DATA:0 };
+  const dateReview = scheduled.filter(c => suspectDob(c)).length; // overlay flag, NOT a bucket
   scheduled.forEach(c => { waveClass[fieldWaveClass(c)]++; });
   // ACTIVE crops with no dated COHORT_PRODUCTION row anywhere (field OR greenhouse). A greenhouse-only
   // crop whose waves are all in the greenhouse is scheduled, just not on this dashboard.
@@ -685,7 +685,7 @@ function computeKPIs(asOf){
   const alertCrops = alertCropIds(al).length;
   const missingWindow = CROPS.filter(c => c.window_kind==='NONE' || c.window_kind==='UNPARSEABLE').length;
   return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, greenhouseWaves, harvestingNow, ready7, ready14,
-           outsideWindow, outsideCrops, waveClass, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow,
+           outsideWindow, outsideCrops, waveClass, dateReview, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow,
            rosterActive, rosterTotal };
 }
 
@@ -724,12 +724,12 @@ function renderDashboard(){
         kpiCell(k.fieldCohorts,'Field Production \u00b7 Direct','','fieldCohorts','sown directly in a field block'),
         kpiCell(k.ghCohorts,'Field Production \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to a field block')
       ])}
-      ${kpiGroup('Field Wave Health \u2014 all '+k.totalCohorts+' scheduled field waves; each is counted in exactly one bucket. All stay on the calendar. Greenhouse waves are separate.', 6, [
+      ${kpiGroup('Field Wave Health \u2014 all '+k.totalCohorts+' scheduled field waves; the first four buckets add up to the total. Only waves outside their planting window are kept off the Field Calendar (see Alerts). Date Review is a flag on top, not a bucket. Greenhouse waves are separate.', 6, [
         kpiCell(k.waveClass.VALID,'In Window \u00b7 Valid','good','waveValid','real DOB, timing confirmed against the field window'),
-        kpiCell(k.waveClass.DATE_REVIEW,'Date Review','warn','waveDate','suspected placeholder DOB \u2014 on calendar, flagged'),
-        kpiCell(k.waveClass.OUTSIDE_WINDOW,'Outside Window','alert','waveOutside','exception \u2014 planting date outside allowable window'),
+        kpiCell(k.waveClass.OUTSIDE_WINDOW,'Outside Window','alert','waveOutside','off the calendar \u2014 listed in Alerts'),
         kpiCell(k.waveClass.CONFLICT,'Conflict','alert','waveConflict','greenhouse-only crop in field, or facility/phase conflict'),
         kpiCell(k.waveClass.MISSING_DATA,'Window Unchecked','warn','waveMissing','no usable window data for the crop'),
+        kpiCell(k.dateReview,'Date Review','warn','waveDate','flag only \u2014 also counted in a bucket above'),
         kpiCell(k.greenhouseWaves,'Greenhouse Waves','info','waveGreenhouse','separate dashboard \u2014 not in the field totals')
       ])}
       ${kpiGroup('Harvest', 3, [
@@ -738,13 +738,14 @@ function renderDashboard(){
         kpiCell(k.ready14,'Harvest Ready 8\u201314 Days','','ready14','first harvest date in 8\u201314 days')
       ])}
       ${kpiGroup('Control', 5, [
-        kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow','in '+k.outsideCrops+' crop'+(k.outsideCrops===1?'':'s')),
+        kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow','in '+k.outsideCrops+' crop'+(k.outsideCrops===1?'':'s')+' \u00b7 same as Outside Window above, off the calendar'),
         kpiCell(k.startsOverdue,'Planned \u00b7 Start Date Passed','warn','startsOverdue','still PLANNED, not dispatched'),
         kpiCell(k.alertCrops,'Alert Crops','warn','alertCrops','crops needing attention'),
         kpiCell(k.noWaves,'Crops Without Scheduled Waves','warn','noWaves','active, no dated cohort (field or greenhouse)'),
         kpiCell(k.missingWindow,'Crops Missing Window Data','warn','missingWindow')
       ])}
     </div>
+    ${rosterNoticeHTML_()}
     ${reconHTML(k)}
     ${masterReconHTML()}
     ${sourceLineHTML()}
@@ -784,6 +785,23 @@ function renderDashboard(){
   document.querySelectorAll('.kpi-grid').forEach(g => el_delegate(g, '.kpi', el => openKpiModal(el.dataset.kpi)));
   el_delegate(document.getElementById('view-dashboard'), '.recon-link', el => openKpiModal(el.dataset.kpi));
   el_delegate(document.getElementById('view-dashboard'), '.recon-jump', () => document.querySelector('#mainNav button[data-tab="alerts"]').click());
+}
+
+// Says WHY the roster looks wrong instead of leaving "of 0 active crops" unexplained.
+function rosterNoticeHTML_(){
+  const notes = [];
+  if(!RECON){
+    notes.push('<b>The backend sent no <code>reconciliation</code> block.</b> The current ControlTowerAPI.gs always includes one, so the deployed script is not that file (or Code.gs drops the field). Master-data issues cannot be shown until it is redeployed as a NEW VERSION.');
+  } else if(RECON.error){
+    notes.push('<b>Reconciliation failed on the backend:</b> ' + esc_(RECON.error));
+  }
+  const nonActive = CROPS.filter(c => !isActiveCrop(c));
+  if(nonActive.length){
+    const by = {}, src = {};
+    nonActive.forEach(c => { by[c.operational_status] = (by[c.operational_status]||0)+1; const k = c.operational_status_source || 'none (crop not found in CROP_REFERENCE)'; src[k] = (src[k]||0)+1; });
+    notes.push('<b>' + nonActive.length + ' of ' + CROPS.length + ' crops are not ACTIVE</b> \u2014 ' + Object.entries(by).map(([k,v]) => k+' '+v).join(', ') + '. Status decided by: ' + Object.entries(src).map(([k,v]) => esc_(k)+' \u00d7'+v).join('; ') + '. This does not remove anything from the calendar; it only affects crop counts and per-crop alerts.');
+  }
+  return notes.length ? `<div class="recon" style="border-left:3px solid var(--amber)">${notes.join('<br>')}</div>` : '';
 }
 
 function sourceLineHTML(){
@@ -913,9 +931,9 @@ function propPath(c){
 // Production Location Conflict anomaly -- already flagged as INVALID_DESTINATION
 // elsewhere). Everything else -- IN WINDOW, or simply not yet window-checked --
 // stays on the calendar.
-// DATE QUALITY WARNING. A FIELD wave whose DOB looks like a placeholder STAYS on the calendar (the manager
-// must see the planned operation) and is flagged: a warning marker on the event, a Date Review alert, and
-// its own Field Wave Health bucket. It is a warning, never a scheduling filter.
+// DATE QUALITY WARNING. A FIELD wave whose DOB looks like a placeholder gets a Date Review alert and a flag.
+// It is a warning, never a filter of its own: whether it shows on the calendar is decided only by the planting
+// window (isFieldCalendarEvent). A placeholder date that lands inside its window stays on the calendar with a warning marker.
 // Deliberately narrow: only dates the data actually supports as suspect. "Same DOB across several crops" is
 // NOT used: the schedule generator legitimately puts many crops on one transplant day (e.g. a dozen on
 // 2027-05-01), so that rule would flag real plantings. Add 'MM-DD' strings here to extend the rule.
@@ -927,13 +945,19 @@ function suspectDob(c){
 }
 function flaggedForDateReview(){ return COHORTS.filter(c => suspectDob(c)); }
 
+function isOutsideWindow(c){ return c.window_check === 'OUTSIDE WINDOW' || c.window_eval === 'OUTSIDE_WINDOW'; }
 function isFieldCalendarEvent(c){
-  // THE field-calendar rule, and nothing else: FIELD destination (greenhouse rows belong to the greenhouse
-  // dashboard) + a DOB (the caller requires one; no date = nothing to place). Crop status, planting windows,
-  // location conflicts and suspect dates are data-governance checks: they raise Alerts, they never remove
-  // an activity.
-  return isFieldCohort(c);
+  // The calendar shows EXECUTABLE field work: COHORT_PRODUCTION says what was scheduled, CROP_LIFECYCLE says
+  // whether that schedule is valid. So a wave appears only if it is
+  //   (1) FIELD destination (greenhouse rows belong to the greenhouse dashboard), and
+  //   (2) not CONFIRMED outside the crop's allowable planting window.
+  // (The caller also requires a DOB.) Only a confirmed violation removes a wave: a crop with no window on record,
+  // or a window the parser couldn't read, is a data gap for Alerts, not proof the wave is invalid -- excluding
+  // those once emptied whole months. Every removed wave is listed in Alerts (Window Exceptions) and counted in
+  // the notice under the calendar, so nothing disappears silently.
+  return isFieldCohort(c) && !isOutsideWindow(c);
 }
+function offCalendarWaves(){ return COHORTS.filter(c => c.dob && isFieldCohort(c) && !isFieldCalendarEvent(c)); }
 function prodAnomaly(c){
   if(c.facility_conflict !== undefined) return c.facility_conflict;
   if(c.in_gh_prop && isGhFacility(c.facility))
@@ -1022,7 +1046,7 @@ function kpiDrilldown_(key, asOf){
     case 'waveValid':
       return { type:'cohorts', title:'Field Waves \u00b7 In Window (valid)', items: scheduled.filter(c=>fieldWaveClass(c)==='VALID') };
     case 'waveDate':
-      return { type:'cohorts', title:'Field Waves \u00b7 Date Review (suspected placeholder DOB)', items: scheduled.filter(c=>fieldWaveClass(c)==='DATE_REVIEW') };
+      return { type:'cohorts', title:'Field Waves \u00b7 Date Review (suspected placeholder DOB)', items: scheduled.filter(c=>suspectDob(c)) };
     case 'waveOutside':
       return { type:'cohorts', title:'Field Waves \u00b7 Outside Window', items: scheduled.filter(c=>fieldWaveClass(c)==='OUTSIDE_WINDOW') };
     case 'waveConflict':
@@ -1266,7 +1290,7 @@ function alertsGroupedHTML(alerts, includeData){
     </div>
     <div class="alert-group">
       <h3 style="color:var(--amber)">DATE REVIEW \u00b7 ${dateQ.length} wave${dateQ.length===1?'':'s'} with a suspect planting date</h3>
-      <div class="alert-section-sub">Field waves whose planting date looks like a placeholder. They stay on the Field Calendar, flagged with \u26a0, until a manager confirms or corrects the date in COHORT_PRODUCTION.</div>
+      <div class="alert-section-sub">Field waves whose planting date looks like a placeholder. A manager should confirm or correct the date in COHORT_PRODUCTION. Waves outside their planting window are off the Field Calendar; any that fall inside their window stay on it, flagged with \u26a0.</div>
       <div class="alert-list">${dateQ.length ? dateQ.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
     </div>
     <div class="alert-group">
@@ -1379,7 +1403,7 @@ function computeAlerts(){
   });
   // Date quality: suspected placeholder DOBs stay on the calendar (flagged) and are reported here.
   flaggedForDateReview().forEach(c => {
-    warning.push({ kind:'date', title: `${c.crop} W${c.wave}: suspected placeholder planting date`, detail: `${suspectDob(c)} \u00b7 still shown on the Field Calendar (flagged) \u2014 manager to confirm the date`, crop: c.crop_id, cohort: c.cohort_id, level:'warning' });
+    warning.push({ kind:'date', title: `${c.crop} W${c.wave}: suspected placeholder planting date`, detail: `${suspectDob(c)} \u00b7 ${isFieldCalendarEvent(c) ? 'shown on the Field Calendar, flagged' : 'not on the Field Calendar (outside its planting window)'} \u2014 manager to confirm the date`, crop: c.crop_id, cohort: c.cohort_id, level:'warning' });
   });
   // Master-data reconciliation issues, straight from the backend. MISSING_COHORTS is skipped here only
   // because the noplan alert above already IS that check (same crops); it is not hidden.
@@ -1487,7 +1511,7 @@ function renderCalGrid(){
       }).join('')}
     </div>
   `;
-  document.getElementById('calGridWrap').innerHTML = html + reviewNoticeHTML_() + calendarDiagnosticsHTML_();
+  document.getElementById('calGridWrap').innerHTML = html + offCalendarNoticeHTML_() + reviewNoticeHTML_() + calendarDiagnosticsHTML_();
   el_delegate(document.getElementById('calGridWrap'), '.cal-event', el => openCohortModal(el.dataset.key));
 }
 
@@ -1512,6 +1536,13 @@ function withheldCauseHTML_(line){
     + (nir ? line('NOT_IN_ROSTER example', esc_(nir.title || nir.detail || '')) : '');
 }
 function esc_(t){ return String(t).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+// Nothing disappears silently: say how many scheduled field waves are not drawn, and why.
+function offCalendarNoticeHTML_(){
+  const off = offCalendarWaves();
+  if(!off.length) return '';
+  const crops = new Set(off.map(c => c.crop_id)).size;
+  return `<div style="margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--text-dim)">${off.length} scheduled field wave${off.length===1?'':'s'} (${crops} crop${crops===1?'':'s'}) not shown: planting date is outside the crop's allowable window. See Alerts \u203a Window Exceptions.</div>`;
+}
 // One line under the grid when the visible month contains flagged events, so the marker is explained.
 function reviewNoticeHTML_(){
   const ym = state.calYear + '-' + String(state.calMonth + 1).padStart(2, '0');
