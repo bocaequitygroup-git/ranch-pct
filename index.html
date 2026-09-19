@@ -1428,8 +1428,34 @@ function renderCalGrid(){
       }).join('')}
     </div>
   `;
-  document.getElementById('calGridWrap').innerHTML = html;
+  document.getElementById('calGridWrap').innerHTML = html + calendarDiagnosticsHTML_();
   el_delegate(document.getElementById('calGridWrap'), '.cal-event', el => openCohortModal(el.dataset.key));
+}
+
+// When the calendar has nothing to draw ANYWHERE, say why instead of showing a blank grid.
+// Walks the same gates as buildEvents(), so the counts add up to what the backend sent.
+function calendarDiagnosticsHTML_(){
+  if(EVENTS.length) return '';
+  const total = COHORTS.length;
+  const dated = COHORTS.filter(c => c.dob);
+  const field = dated.filter(isFieldCohort);
+  const outside = field.filter(c => c.window_check === 'OUTSIDE WINDOW' || c.window_eval === 'OUTSIDE_WINDOW');
+  const ghOnly = field.filter(c => c.window_eval === 'GREENHOUSE_ONLY');
+  const badDates = dated.filter(c => !/^\d{4}-\d{2}-\d{2}$/.test(String(c.dob)));
+  const s = SUMMARY || {};
+  const line = (k, v) => `<div><span style="color:var(--text-faint)">${k}</span> <b>${v}</b></div>`;
+  return `<div class="panel" style="margin-top:12px;font-family:var(--mono);font-size:12px;line-height:1.7">
+    <div style="color:var(--amber);font-weight:700;margin-bottom:6px">Calendar has no events to show — why:</div>
+    ${line('cohorts received from Sheet', total)}
+    ${line('with a usable DOB', dated.length)}
+    ${line('DOBs not in yyyy-MM-dd form', badDates.length + (badDates[0] ? '  e.g. ' + JSON.stringify(badDates[0].dob) : ''))}
+    ${line('field destination', field.length)}
+    ${line('removed: outside planting window', outside.length)}
+    ${line('removed: greenhouse-only crop in field', ghOnly.length)}
+    ${line('backend: undated rows', s.cohorts_undated ?? 'n/a')}
+    ${line('backend: withheld (non-ACTIVE crops)', s.non_active_cohorts ?? 'n/a')}
+    ${line('backend: greenhouse destination', s.greenhouse_cohorts_total ?? 'n/a')}
+  </div>`;
 }
 
 function eventIcon(e){
