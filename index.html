@@ -602,7 +602,7 @@ const STAGE_LABEL = { 'planned':'Planned','growing':'Growing','harvesting':'Harv
 function buildEvents(){
   const events = [];
   COHORTS.forEach(c => {
-    if(!c.dob || !isFieldCohort(c)) return; // dataset boundary: field-only calendar
+    if(!c.dob || !isFieldCalendarEvent(c)) return; // dataset boundary + field-window boundary: field-only, in-window calendar
     // DOB is the planting date for every method — GH-PROP's transplant IS
     // this event, not a separate later one, so there's only ever one plant
     // event per cohort on the calendar.
@@ -853,6 +853,25 @@ function propPath(c){
   if(c.propagation_path !== undefined) return c.propagation_path;
   return c.in_gh_prop ? 'GH-PROP \u2192 ' + (prodPhase(c) === 'FIELD' ? 'FIELD' : 'GH') : null;
 }
+// ============ FIELD CALENDAR ELIGIBILITY ============
+// isFieldCohort() answers one question only -- destination (FIELD vs GREENHOUSE)
+// -- and deliberately still counts an out-of-window FIELD cohort, because KPIs/
+// alerts/recon need that anomaly visible (see windowRecon, computeAlerts' 'window'
+// kind) to tell someone to go fix it in COHORT_PRODUCTION.
+// The Field Planting Calendar asks a narrower question: "is this an activity the
+// field is actually allowed to do, right now?" A FIELD-destination cohort whose
+// DOB falls outside its crop's Allowable_Planting_Window (window_check !== 'IN
+// WINDOW' -- this also covers GREENHOUSE_ONLY/NO_WINDOW/WINDOW_UNPARSEABLE, none
+// of which are a confirmed in-window field planting) is real bad/unvalidated
+// data, not a field event, and must not render on this calendar even though it
+// still shows up elsewhere as something to fix. Only isFieldCohort(c) AND
+// window_check === 'IN WINDOW' clears the calendar.
+function isFieldCalendarEvent(c){
+  if(!isFieldCohort(c)) return false;
+  if(c.window_check !== undefined) return c.window_check === 'IN WINDOW';
+  if(c.window_eval !== undefined) return c.window_eval === 'IN_WINDOW';
+  return true; // no window data sent at all (very old deployment) -- can't confirm, don't hide
+}
 function prodAnomaly(c){
   if(c.facility_conflict !== undefined) return c.facility_conflict;
   if(c.in_gh_prop && isGhFacility(c.facility))
@@ -1012,7 +1031,10 @@ function openKpiModal(key){
 
 function renderTodayPanel(){
   const asOf = state.asOf;
-  const scheduled = COHORTS.filter(c=>c.dob && isFieldCohort(c)); // dataset boundary: field-only
+  // Same field-window boundary as the calendar (isFieldCalendarEvent): an
+  // out-of-window/GREENHOUSE_ONLY FIELD cohort still counts in KPIs/alerts as
+  // an anomaly to fix, but must not tell someone it's a real activity "today".
+  const scheduled = COHORTS.filter(c=>c.dob && isFieldCalendarEvent(c));
   const startGH = scheduled.filter(c => c.in_gh_prop && c.gh_prop_start === asOf);
   const transplantToday = scheduled.filter(c => c.in_gh_prop && c.field_date === asOf);
   const fieldPlantToday = scheduled.filter(c => !c.in_gh_prop && c.facility_phase !== 'GH-FULL' && c.dob === asOf);
