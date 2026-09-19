@@ -512,8 +512,24 @@ function isActiveCrop(c){ return !c.operational_status || c.operational_status =
 function cropScheduledTotal(c){ return c.scheduled_waves_total !== undefined ? c.scheduled_waves_total : c.valid_waves; }
 function statusBadge(c){
   if(isActiveCrop(c)) return '';
-  const label = String(c.operational_status || '').replace(/_/g,' ');
-  return `<span class="badge win-out" title="Not an ACTIVE production crop -- see Alerts (master data)">${label}</span>`;
+  return `<span class="badge win-out" title="Not an ACTIVE production crop -- see Alerts (master data)">${nonActiveLabel(c)}</span>`;
+}
+// Human label for a non-ACTIVE crop's status. NOT_IN_ROSTER is deliberately relabeled
+// here: per ControlTowerAPI.gs (ctOperationalStatus_), it means some other tab
+// (COHORT_PRODUCTION / CROP_LIFECYCLE / CROP_PRODUCTION_MASTER) references a Crop_ID
+// that CROP_REFERENCE -- the roster authority -- does not have at all. That is a
+// reconciliation failure to go fix (a typo'd or stale code), not "this crop was
+// deliberately left out of the roster" -- which is what "not in roster" reads as to
+// someone scanning the crop list. "UNKNOWN CROP CODE" says what actually happened.
+// The backend also sends in_roster (!!ref) independently of operational_status; if the
+// two ever disagree (in_roster true but status still NOT_IN_ROSTER, or vice versa) that
+// is itself a bug in the join and is surfaced rather than silently picking one field.
+function nonActiveLabel(c){
+  if(c.operational_status === 'NOT_IN_ROSTER'){
+    if(c.in_roster === true) return 'RECONCILIATION MISMATCH \u2014 in_roster says found, status says not in roster';
+    return 'UNKNOWN CROP CODE';
+  }
+  return String(c.operational_status || '').replace(/_/g,' ');
 }
 
 // ============ DATE HELPERS ============
@@ -859,18 +875,27 @@ function propPath(c){
 // alerts/recon need that anomaly visible (see windowRecon, computeAlerts' 'window'
 // kind) to tell someone to go fix it in COHORT_PRODUCTION.
 // The Field Planting Calendar asks a narrower question: "is this an activity the
-// field is actually allowed to do, right now?" A FIELD-destination cohort whose
-// DOB falls outside its crop's Allowable_Planting_Window (window_check !== 'IN
-// WINDOW' -- this also covers GREENHOUSE_ONLY/NO_WINDOW/WINDOW_UNPARSEABLE, none
-// of which are a confirmed in-window field planting) is real bad/unvalidated
-// data, not a field event, and must not render on this calendar even though it
-// still shows up elsewhere as something to fix. Only isFieldCohort(c) AND
-// window_check === 'IN WINDOW' clears the calendar.
+// field is actually allowed to do, right now?" But that narrower question must
+// only ever REMOVE a confirmed violation, never anything merely unconfirmed --
+// missing window data, a window the parser couldn't read, or an older backend
+// that sends no window fields at all are DATA GAPS to flag in Alerts, not
+// evidence the cohort is invalid. An earlier version of this function required
+// window_check === 'IN WINDOW' outright, which also caught every NO_WINDOW /
+// WINDOW_UNPARSEABLE cohort (window_check is explicitly null for those, and
+// null !== undefined, so the strict check failed them too) -- emptying whole
+// months, including future ones, that had perfectly real scheduled field work.
+// So this only excludes a cohort for a POSITIVELY CONFIRMED reason: the window
+// model evaluated it and found it outside the crop's allowable window, or it is
+// a FIELD-destination row on a crop lifecycle marks GREENHOUSE_ONLY (the
+// Production Location Conflict anomaly -- already flagged as INVALID_DESTINATION
+// elsewhere). Everything else -- IN WINDOW, or simply not yet window-checked --
+// stays on the calendar.
 function isFieldCalendarEvent(c){
   if(!isFieldCohort(c)) return false;
-  if(c.window_check !== undefined) return c.window_check === 'IN WINDOW';
-  if(c.window_eval !== undefined) return c.window_eval === 'IN_WINDOW';
-  return true; // no window data sent at all (very old deployment) -- can't confirm, don't hide
+  if(c.window_check === 'OUTSIDE WINDOW') return false;
+  if(c.window_eval === 'OUTSIDE_WINDOW') return false;
+  if(c.window_eval === 'GREENHOUSE_ONLY') return false; // FIELD row on a greenhouse-only crop: anomaly, not a field event
+  return true;
 }
 function prodAnomaly(c){
   if(c.facility_conflict !== undefined) return c.facility_conflict;
@@ -1210,7 +1235,7 @@ const MASTER_GROUPS = [
   ['INVALID_DESTINATION',              'Invalid destination \u2014 a field cohort on a GREENHOUSE-ONLY crop (lifecycle wins; fix the cohort)'],
   ['DISPUTED_CROP',                    'Disputed crops \u2014 master data review required (not counted as active production)'],
   ['NON_ACTIVE_HAS_COHORTS',           'Cohort rows on a crop that is not active \u2014 withheld from every count'],
-  ['NOT_IN_ROSTER',                    'Crop not in the CROP_REFERENCE roster'],
+  ['NOT_IN_ROSTER',                    'Unknown crop code \u2014 referenced by another tab but absent from the CROP_REFERENCE roster'],
   ['INVALID_STATUS',                   'Unrecognised Crop_Operational_Status'],
   ['MISSING_FROM_LIFECYCLE',           'Active crop with no CROP_LIFECYCLE row'],
   ['MISSING_FROM_PRODUCTION_MASTER',   'Active crop with no CROP_PRODUCTION_MASTER row'],
@@ -1444,7 +1469,7 @@ function renderCropsList(){
           <div class="crop-card" data-crop="${c.crop_id}">
             <div class="name">${c.crop}</div>
             <div class="meta">${methodBadge(c.method)} ${cropWindowBadge(c)} ${statusBadge(c)}</div>
-            <div class="waves">${isActiveCrop(c) ? `${c.valid_waves} / ${c.total_slots} field waves scheduled${c.greenhouse_waves ? ' · '+c.greenhouse_waves+' in greenhouse' : ''}` : 'not counted \u2014 '+String(c.operational_status).toLowerCase().replace(/_/g,' ')+(c.excluded_waves ? ' ('+c.excluded_waves+' cohort rows withheld)' : '')} ${c.window_kind==='FIELD' ? '· window: '+c.window_label : (c.window_kind==='GREENHOUSE_ONLY' ? '· greenhouse only' : '· no planting window')}</div>
+            <div class="waves">${isActiveCrop(c) ? `${c.valid_waves} / ${c.total_slots} field waves scheduled${c.greenhouse_waves ? ' · '+c.greenhouse_waves+' in greenhouse' : ''}` : 'not counted \u2014 '+nonActiveLabel(c).toLowerCase()+(c.excluded_waves ? ' ('+c.excluded_waves+' cohort rows withheld)' : '')} ${c.window_kind==='FIELD' ? '· window: '+c.window_label : (c.window_kind==='GREENHOUSE_ONLY' ? '· greenhouse only' : '· no planting window')}</div>
           </div>
         `).join('')}
       </div>
@@ -1485,7 +1510,7 @@ function openCropDetail(cropId){
         <div class="sumbox"><div class="k">MINIMUM WAVES</div><div class="v">${crop.min_waves}</div></div>
         <div class="sumbox"><div class="k">SCHEDULED WAVES</div><div class="v">${crop.valid_waves} / ${crop.total_slots}</div></div>
         <div class="sumbox"><div class="k">DATA STATUS</div><div class="v" style="font-size:12.5px;">${crop.data_status}</div></div>
-        ${crop.operational_status !== undefined ? `<div class="sumbox"><div class="k">OPERATIONAL STATUS</div><div class="v" style="font-size:12.5px;">${String(crop.operational_status).replace(/_/g,' ')}${crop.zoning_blocks && crop.zoning_blocks.length ? ' \u00b7 zoned ' + crop.zoning_blocks.join(', ') : ''}</div></div>` : ''}
+        ${crop.operational_status !== undefined ? `<div class="sumbox"><div class="k">OPERATIONAL STATUS</div><div class="v" style="font-size:12.5px;">${crop.operational_status === 'ACTIVE' ? 'ACTIVE' : nonActiveLabel(crop)}${crop.zoning_blocks && crop.zoning_blocks.length ? ' \u00b7 zoned ' + crop.zoning_blocks.join(', ') : ''}</div></div>` : ''}
         <div class="sumbox"><div class="k">NEXT DOB</div><div class="v">${fmtShortY(nextEventAfter(rows,'dob',state.asOf))}</div></div>
         <div class="sumbox"><div class="k">NEXT HARVEST READY</div><div class="v">${fmtShortY(nextEventAfter(rows,'harvest_ready',state.asOf))}</div></div>
         <div class="sumbox"><div class="k">HARVEST PATTERN</div><div class="v" style="font-size:12.5px;">${crop.pattern}</div></div>
