@@ -242,6 +242,7 @@
     border-left: 2px solid var(--line);
   }
   .cal-event:hover{ filter: brightness(1.3); }
+  .cal-event.date-review{ outline:1px dashed var(--amber); outline-offset:-1px; }
   .cal-event.plant.ghprop{ border-left-color: var(--blue); background: rgba(86,168,201,0.10); color:#bfe3f2;}
   .cal-event.plant.direct{ border-left-color: var(--green); background: rgba(111,191,106,0.10); color:#c9ecc6;}
   .cal-event.transplant{ border-left-color: var(--amber); background: rgba(224,168,60,0.10); color:#f2dca9;}
@@ -618,7 +619,7 @@ const STAGE_LABEL = { 'planned':'Planned','growing':'Growing','harvesting':'Harv
 function buildEvents(){
   const events = [];
   COHORTS.forEach(c => {
-    if(!c.dob || !isFieldCalendarEvent(c)) return; // dataset boundary + field-window boundary: field-only, in-window calendar
+    if(!c.dob || !isFieldCalendarEvent(c)) return; // FIELD destination + believable DOB; everything else is an alert, not a filter
     // DOB is the planting date for every method — GH-PROP's transplant IS
     // this event, not a separate later one, so there's only ever one plant
     // event per cohort on the calendar.
@@ -642,6 +643,18 @@ function indexEvents(){
 // (never dispatched/confirmed). getStage() deliberately keeps these as 'planned'; this surfaces them.
 function startOverdue(c, asOf){ return !!c.dob && c.pipeline_status === 'PLANNED' && c.dob < asOf; }
 
+// Production-health class for a scheduled FIELD wave. Display and validation are separate: every
+// class stays on the calendar; this only decides which health bucket a wave is COUNTED in.
+// Each wave lands in exactly one bucket (precedence: DATE_REVIEW, OUTSIDE_WINDOW, CONFLICT, MISSING_DATA, VALID),
+// so the four always add up to the scheduled total.
+function fieldWaveClass(c){
+  if(suspectDob(c)) return 'DATE_REVIEW';
+  if(c.window_check === 'OUTSIDE WINDOW' || c.window_eval === 'OUTSIDE_WINDOW') return 'OUTSIDE_WINDOW';
+  if(c.window_eval === 'GREENHOUSE_ONLY' || prodAnomaly(c)) return 'CONFLICT';
+  if(c.window_eval === 'NO_WINDOW' || c.window_eval === 'WINDOW_UNPARSEABLE') return 'MISSING_DATA';
+  return 'VALID';
+}
+
 function computeKPIs(asOf){
   const scheduled = COHORTS.filter(c=>c.dob && isFieldCohort(c)); // dataset boundary: field-only
   const startsOverdue = scheduled.filter(c => startOverdue(c, asOf)).length;
@@ -662,6 +675,8 @@ function computeKPIs(asOf){
   const outsideCrops = new Set(outsideWaves.map(c=>c.crop_id)).size;
   const recon = windowRecon(scheduled);
   const facilityChecks = scheduled.filter(c => prodAnomaly(c)).length;
+  const waveClass = { VALID:0, DATE_REVIEW:0, OUTSIDE_WINDOW:0, CONFLICT:0, MISSING_DATA:0 };
+  scheduled.forEach(c => { waveClass[fieldWaveClass(c)]++; });
   // ACTIVE crops with no dated COHORT_PRODUCTION row anywhere (field OR greenhouse). A greenhouse-only
   // crop whose waves are all in the greenhouse is scheduled, just not on this dashboard.
   const noWaves = CROPS.filter(c => isActiveCrop(c) && cropScheduledTotal(c) === 0).length;
@@ -670,7 +685,7 @@ function computeKPIs(asOf){
   const alertCrops = alertCropIds(al).length;
   const missingWindow = CROPS.filter(c => c.window_kind==='NONE' || c.window_kind==='UNPARSEABLE').length;
   return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, greenhouseWaves, harvestingNow, ready7, ready14,
-           outsideWindow, outsideCrops, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow,
+           outsideWindow, outsideCrops, waveClass, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow,
            rosterActive, rosterTotal };
 }
 
@@ -708,6 +723,14 @@ function renderDashboard(){
         kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years, field only'),
         kpiCell(k.fieldCohorts,'Field Production \u00b7 Direct','','fieldCohorts','sown directly in a field block'),
         kpiCell(k.ghCohorts,'Field Production \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to a field block')
+      ])}
+      ${kpiGroup('Field Wave Health \u2014 all '+k.totalCohorts+' scheduled field waves; each is counted in exactly one bucket. All stay on the calendar. Greenhouse waves are separate.', 6, [
+        kpiCell(k.waveClass.VALID,'In Window \u00b7 Valid','good','waveValid','real DOB, timing confirmed against the field window'),
+        kpiCell(k.waveClass.DATE_REVIEW,'Date Review','warn','waveDate','suspected placeholder DOB \u2014 on calendar, flagged'),
+        kpiCell(k.waveClass.OUTSIDE_WINDOW,'Outside Window','alert','waveOutside','exception \u2014 planting date outside allowable window'),
+        kpiCell(k.waveClass.CONFLICT,'Conflict','alert','waveConflict','greenhouse-only crop in field, or facility/phase conflict'),
+        kpiCell(k.waveClass.MISSING_DATA,'Window Unchecked','warn','waveMissing','no usable window data for the crop'),
+        kpiCell(k.greenhouseWaves,'Greenhouse Waves','info','waveGreenhouse','separate dashboard \u2014 not in the field totals')
       ])}
       ${kpiGroup('Harvest', 3, [
         kpiCell(k.harvestingNow,'Harvesting Now','good','harvestingNow','first harvest \u2264 today \u2264 harvest end'),
@@ -831,7 +854,7 @@ function masterReconHTML(){
     ${unschedActive.length ? `<br><span class="amb recon-link" data-kpi="noWaves">\u26a0 ${unschedActive.length} active crop${unschedActive.length===1?'':'s'} with no scheduled cohort: ${list(unschedActive)}</span>` : ''}
     ${unschedOther.length ? `<br><span style="color:var(--text-faint);">Not active, not scheduled (not counted anywhere): ${unschedOther.map(u => u.crop + ' [' + u.operational_status.toLowerCase().replace(/_/g,' ') + ']').join(', ')}</span>` : ''}
     ${nirN ? `<br><span class="bad">${nirN} crop${nirN===1?'':'s'} in a crop tab but not in CROP_REFERENCE</span>` : ''}
-    ${r.non_active_cohorts ? `<br><span class="bad">${r.non_active_cohorts} cohort row${r.non_active_cohorts===1?'':'s'} on non-active crops withheld from every count</span>` : ''}
+    ${r.non_active_cohorts ? `<br><span class="bad">${r.non_active_cohorts} cohort row${r.non_active_cohorts===1?'':'s'} on non-active crops (still scheduled \u2014 fix the crop status)</span>` : ''}
     <br>Master-data issues: ${ic.critical ? `<span class="bad recon-jump recon-link">${ic.critical} critical</span>` : '0 critical'} \u00b7
     <span class="${ic.warning ? 'amb recon-jump recon-link' : ''}">${ic.warning} warning</span> \u00b7
     <span class="${ic.info ? 'recon-jump recon-link' : ''}">${ic.info} info</span>
@@ -890,12 +913,26 @@ function propPath(c){
 // Production Location Conflict anomaly -- already flagged as INVALID_DESTINATION
 // elsewhere). Everything else -- IN WINDOW, or simply not yet window-checked --
 // stays on the calendar.
+// DATE QUALITY WARNING. A FIELD wave whose DOB looks like a placeholder STAYS on the calendar (the manager
+// must see the planned operation) and is flagged: a warning marker on the event, a Date Review alert, and
+// its own Field Wave Health bucket. It is a warning, never a scheduling filter.
+// Deliberately narrow: only dates the data actually supports as suspect. "Same DOB across several crops" is
+// NOT used: the schedule generator legitimately puts many crops on one transplant day (e.g. a dozen on
+// 2027-05-01), so that rule would flag real plantings. Add 'MM-DD' strings here to extend the rule.
+const PLACEHOLDER_DOB_MD = ['01-01'];
+function suspectDob(c){
+  if(!c || !c.dob || !isFieldCohort(c)) return null;
+  return PLACEHOLDER_DOB_MD.indexOf(c.dob.slice(5)) >= 0
+    ? 'DOB is Jan 1 (' + c.dob + ') \u2014 possible placeholder planting date' : null;
+}
+function flaggedForDateReview(){ return COHORTS.filter(c => suspectDob(c)); }
+
 function isFieldCalendarEvent(c){
-  if(!isFieldCohort(c)) return false;
-  if(c.window_check === 'OUTSIDE WINDOW') return false;
-  if(c.window_eval === 'OUTSIDE_WINDOW') return false;
-  if(c.window_eval === 'GREENHOUSE_ONLY') return false; // FIELD row on a greenhouse-only crop: anomaly, not a field event
-  return true;
+  // THE field-calendar rule, and nothing else: FIELD destination (greenhouse rows belong to the greenhouse
+  // dashboard) + a DOB (the caller requires one; no date = nothing to place). Crop status, planting windows,
+  // location conflicts and suspect dates are data-governance checks: they raise Alerts, they never remove
+  // an activity.
+  return isFieldCohort(c);
 }
 function prodAnomaly(c){
   if(c.facility_conflict !== undefined) return c.facility_conflict;
@@ -982,6 +1019,18 @@ function kpiDrilldown_(key, asOf){
     case 'ready14':
       return { type:'cohorts', title:'Harvest Ready 8–14 Days',
         items: scheduled.filter(c=>c.harvest_ready && daysBetween(asOf,c.harvest_ready)>7 && daysBetween(asOf,c.harvest_ready)<=14) };
+    case 'waveValid':
+      return { type:'cohorts', title:'Field Waves \u00b7 In Window (valid)', items: scheduled.filter(c=>fieldWaveClass(c)==='VALID') };
+    case 'waveDate':
+      return { type:'cohorts', title:'Field Waves \u00b7 Date Review (suspected placeholder DOB)', items: scheduled.filter(c=>fieldWaveClass(c)==='DATE_REVIEW') };
+    case 'waveOutside':
+      return { type:'cohorts', title:'Field Waves \u00b7 Outside Window', items: scheduled.filter(c=>fieldWaveClass(c)==='OUTSIDE_WINDOW') };
+    case 'waveConflict':
+      return { type:'cohorts', title:'Field Waves \u00b7 Conflict', items: scheduled.filter(c=>fieldWaveClass(c)==='CONFLICT') };
+    case 'waveMissing':
+      return { type:'cohorts', title:'Field Waves \u00b7 Window Unchecked (no window data)', items: scheduled.filter(c=>fieldWaveClass(c)==='MISSING_DATA') };
+    case 'waveGreenhouse':
+      return { type:'cohorts', title:'Greenhouse Waves (separate dashboard)', items: COHORTS.filter(c=>c.dob && !isFieldCohort(c)) };
     case 'outsideWindow':
       return { type:'cohorts', title:'Waves Outside Window', items: scheduled.filter(c=>c.window_check==='OUTSIDE WINDOW') };
     case 'missingWindow':
@@ -1056,9 +1105,9 @@ function openKpiModal(key){
 
 function renderTodayPanel(){
   const asOf = state.asOf;
-  // Same field-window boundary as the calendar (isFieldCalendarEvent): an
-  // out-of-window/GREENHOUSE_ONLY FIELD cohort still counts in KPIs/alerts as
-  // an anomaly to fix, but must not tell someone it's a real activity "today".
+  // Same boundary as the calendar (isFieldCalendarEvent = FIELD destination): the Today panel
+  // shows the manager's field plan. Out-of-window / conflict waves appear here too, and are
+  // flagged separately in Field Wave Health and Alerts.
   const scheduled = COHORTS.filter(c=>c.dob && isFieldCalendarEvent(c));
   const startGH = scheduled.filter(c => c.in_gh_prop && c.gh_prop_start === asOf);
   const transplantToday = scheduled.filter(c => c.in_gh_prop && c.field_date === asOf);
@@ -1173,6 +1222,7 @@ function alertsGroupedHTML(alerts, includeData){
   const cov = all.filter(a => a.kind === 'coverage');
   const noplan = all.filter(a => a.kind === 'noplan');
   const data = all.filter(a => a.kind === 'data');
+  const dateQ = all.filter(a => a.kind === 'date');
   // Info-level master items (e.g. zoning sheet is the legacy side) show only in the full Alerts tab, like NEEDS DATA.
   const master = all.filter(a => a.kind === 'master' && (includeData || a.level !== 'info'));
   const exc = windowExceptionRows();
@@ -1215,6 +1265,11 @@ function alertsGroupedHTML(alerts, includeData){
       ${excTable}
     </div>
     <div class="alert-group">
+      <h3 style="color:var(--amber)">DATE REVIEW \u00b7 ${dateQ.length} wave${dateQ.length===1?'':'s'} with a suspect planting date</h3>
+      <div class="alert-section-sub">Field waves whose planting date looks like a placeholder. They stay on the Field Calendar, flagged with \u26a0, until a manager confirms or corrects the date in COHORT_PRODUCTION.</div>
+      <div class="alert-list">${dateQ.length ? dateQ.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
+    </div>
+    <div class="alert-group">
       <h3 style="color:var(--amber)">COVERAGE / WAVE COUNT \u00b7 ${cov.length} crop${cov.length===1?'':'s'} below minimum</h3>
       <div class="alert-list">${cov.length ? cov.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
     </div>
@@ -1234,7 +1289,7 @@ function alertsGroupedHTML(alerts, includeData){
 const MASTER_GROUPS = [
   ['INVALID_DESTINATION',              'Invalid destination \u2014 a field cohort on a GREENHOUSE-ONLY crop (lifecycle wins; fix the cohort)'],
   ['DISPUTED_CROP',                    'Disputed crops \u2014 master data review required (not counted as active production)'],
-  ['NON_ACTIVE_HAS_COHORTS',           'Cohort rows on a crop that is not active \u2014 withheld from every count'],
+  ['NON_ACTIVE_HAS_COHORTS',           'Cohort rows on a crop that is not active \u2014 still scheduled; fix the crop status'],
   ['NOT_IN_ROSTER',                    'Unknown crop code \u2014 referenced by another tab but absent from the CROP_REFERENCE roster'],
   ['INVALID_STATUS',                   'Unrecognised Crop_Operational_Status'],
   ['MISSING_FROM_LIFECYCLE',           'Active crop with no CROP_LIFECYCLE row'],
@@ -1321,6 +1376,10 @@ function computeAlerts(){
     } else if(crop.window_kind==='UNPARSEABLE'){
       info.push({ kind:'data', title: `${crop.crop}: planting window could not be read`, detail: `CROP_LIFECYCLE says "${crop.window_label}" \u2014 fix the text so waves can be checked`, crop: crop.crop_id, level:'info' });
     }
+  });
+  // Date quality: suspected placeholder DOBs stay on the calendar (flagged) and are reported here.
+  flaggedForDateReview().forEach(c => {
+    warning.push({ kind:'date', title: `${c.crop} W${c.wave}: suspected placeholder planting date`, detail: `${suspectDob(c)} \u00b7 still shown on the Field Calendar (flagged) \u2014 manager to confirm the date`, crop: c.crop_id, cohort: c.cohort_id, level:'warning' });
   });
   // Master-data reconciliation issues, straight from the backend. MISSING_COHORTS is skipped here only
   // because the noplan alert above already IS that check (same crops); it is not hidden.
@@ -1422,13 +1481,13 @@ function renderCalGrid(){
         const extra = dayEvents.length - shown.length;
         return `<div class="cal-cell ${isToday?'today':''}" data-iso="${c.iso}">
           <div class="cal-daynum">${c.dnum}</div>
-          ${shown.map(e => `<div class="cal-event ${e.type} ${e.sub}" data-key="${e.cohort.key}" title="${e.cohort.crop} — Wave ${e.cohort.wave}">${eventIcon(e)} ${e.cohort.crop_id} W${e.cohort.wave}</div>`).join('')}
+          ${shown.map(e => `<div class="cal-event ${e.type} ${e.sub}${suspectDob(e.cohort)?' date-review':''}" data-key="${e.cohort.key}" title="${e.cohort.crop} — Wave ${e.cohort.wave}${suspectDob(e.cohort)?' \u26a0 '+suspectDob(e.cohort):''}">${eventIcon(e)} ${e.cohort.crop_id} W${e.cohort.wave}${suspectDob(e.cohort)?' \u26a0':''}</div>`).join('')}
           ${extra>0?`<div class="cal-more">+${extra} more</div>`:''}
         </div>`;
       }).join('')}
     </div>
   `;
-  document.getElementById('calGridWrap').innerHTML = html + calendarDiagnosticsHTML_();
+  document.getElementById('calGridWrap').innerHTML = html + reviewNoticeHTML_() + calendarDiagnosticsHTML_();
   el_delegate(document.getElementById('calGridWrap'), '.cal-event', el => openCohortModal(el.dataset.key));
 }
 
@@ -1453,6 +1512,13 @@ function withheldCauseHTML_(line){
     + (nir ? line('NOT_IN_ROSTER example', esc_(nir.title || nir.detail || '')) : '');
 }
 function esc_(t){ return String(t).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+// One line under the grid when the visible month contains flagged events, so the marker is explained.
+function reviewNoticeHTML_(){
+  const ym = state.calYear + '-' + String(state.calMonth + 1).padStart(2, '0');
+  const n = EVENTS.filter(e => e.date.startsWith(ym) && suspectDob(e.cohort)).length;
+  if(!n) return '';
+  return `<div style="margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--amber)">\u26a0 ${n} event${n===1?'':'s'} this month ${n===1?'has':'have'} a suspected placeholder planting date \u2014 planned, shown, and listed under Alerts \u203a Date Review for manager confirmation.</div>`;
+}
 function calendarDiagnosticsHTML_(){
   if(EVENTS.length) return '';
   const total = COHORTS.length;
