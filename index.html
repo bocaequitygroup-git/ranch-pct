@@ -1232,7 +1232,7 @@ function openCohortModal(key){
   backdrop.classList.add('open');
 }
 
-// Writes a new DOB back to COHORT_ENGINE via the backend, then merges the
+// Writes a new DOB back to COHORT_PRODUCTION via the backend, then merges the
 // engine's freshly recomputed cohort + crop summary into local state and
 // re-renders both the modal (in place) and whichever tab is behind it.
 async function saveDob_(key, newDob){
@@ -1299,6 +1299,30 @@ function hideError(){
   document.getElementById('errorBanner').classList.remove('show');
 }
 
+// Shows which workbook actually answered. If the response has no `source`
+// stamp, the URL above is serving code that predates it -- i.e. NOT the
+// current ControlTowerAPI.gs -- which is the "wrong/old data" symptom.
+function reportSource(data){
+  const label = document.getElementById('syncStatusText');
+  const src = data && data.source;
+  if(!src){
+    showBackendWarning('This URL is not running the current Control Tower backend (no workbook stamp in its response). It is an old deployment, an old script version, or a different project. Check APPS_SCRIPT_URL and redeploy as a NEW VERSION.');
+    return;
+  }
+  document.getElementById('syncStatus').title = 'Workbook ID: ' + src.workbook_id + '\nCohorts: ' + src.cohort_count + ' · Crops: ' + src.crop_count;
+  const missing = Object.keys(src.tabs_present).filter(k => !src.tabs_present[k]);
+  if(missing.length){
+    showBackendWarning('Connected to workbook "' + src.workbook_name + '", which is missing: ' + missing.join(', ') + '. This is not Ranch_Vegetable_VPOS_MASTER_v2026.');
+  } else if(!/VPOS_MASTER/i.test(src.workbook_name)){
+    showBackendWarning('Connected to workbook "' + src.workbook_name + '" -- expected Ranch_Vegetable_VPOS_MASTER_v2026.');
+  }
+  label.textContent += ' · ' + src.workbook_name;
+}
+function showBackendWarning(msg){
+  document.getElementById('errorBannerText').textContent = msg;
+  document.getElementById('errorBanner').classList.add('show');
+}
+
 function applyDataset(data){
   COHORTS = data.cohorts;
   CROPS = data.crops;
@@ -1318,13 +1342,18 @@ async function boot(){
     applyDataset(data);
     const isFirstLoad = !document.getElementById('view-dashboard').dataset.booted;
     if(isFirstLoad){
-      state.asOf = SEASON_START;
-      state.calYear = pd(SEASON_START).getFullYear();
-      state.calMonth = pd(SEASON_START).getMonth();
+      // Open on the real today, NOT the earliest DOB in the data. VPOS holds
+      // rows that start in Oct 2025, so defaulting to SEASON_START opened the
+      // tower a year in the past (every "today" panel read 0). The "Season
+      // start" button still jumps there on demand.
+      state.asOf = todayISO();
+      state.calYear = pd(state.asOf).getFullYear();
+      state.calMonth = pd(state.asOf).getMonth();
       initHeader();
       document.getElementById('view-dashboard').dataset.booted = '1';
     }
     setSyncStatus('ok', 'synced ' + new Date().toLocaleTimeString());
+    reportSource(data);
     renderAll();
   } catch(err){
     showError(err.message || String(err));
@@ -1344,6 +1373,7 @@ async function refreshData(){
     const data = await api('get-control-tower-data');
     applyDataset(data);
     setSyncStatus('ok', 'synced ' + new Date().toLocaleTimeString());
+    reportSource(data);
     renderAll();
   } catch(err){
     showError(err.message || String(err));
