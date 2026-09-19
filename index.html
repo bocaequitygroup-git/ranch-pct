@@ -1434,6 +1434,25 @@ function renderCalGrid(){
 
 // When the calendar has nothing to draw ANYWHERE, say why instead of showing a blank grid.
 // Walks the same gates as buildEvents(), so the counts add up to what the backend sent.
+// WHY crops are withheld. "non-ACTIVE" has three very different causes with different fixes:
+//   NOT_IN_ROSTER    CROP_REFERENCE unreadable/empty or missing this Crop_ID  -> fix the roster read
+//   DISPUTED+invalid Crop_Operational_Status holds a value the backend can't read (typo / new wording)
+//   PROCUREMENT_ONLY/DISPUTED  the crop is genuinely listed in PROCUREMENT_REFERENCE
+function withheldCauseHTML_(line){
+  if(!CROPS.length) return '';
+  const by = {}, src = {};
+  CROPS.forEach(c => { const st = c.operational_status || 'ACTIVE'; by[st] = (by[st]||0)+1;
+    if(st !== 'ACTIVE'){ const k = c.operational_status_source || 'none'; src[k] = (src[k]||0)+1; } });
+  if(Object.keys(by).every(k => k === 'ACTIVE')) return '';
+  const issues = (RECON && RECON.issues) || [];
+  const ex = code => issues.find(i => i.code === code);
+  const inv = ex('INVALID_STATUS'), nir = ex('NOT_IN_ROSTER');
+  return line('crops by status', Object.entries(by).map(([k,v]) => k+' '+v).join(' · '))
+    + line('status decided by', Object.entries(src).map(([k,v]) => k+' ×'+v).join(' · ') || '—')
+    + (inv ? line('INVALID_STATUS example', esc_(inv.title || inv.detail || '')) : '')
+    + (nir ? line('NOT_IN_ROSTER example', esc_(nir.title || nir.detail || '')) : '');
+}
+function esc_(t){ return String(t).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
 function calendarDiagnosticsHTML_(){
   if(EVENTS.length) return '';
   const total = COHORTS.length;
@@ -1455,6 +1474,7 @@ function calendarDiagnosticsHTML_(){
     ${line('backend: undated rows', s.cohorts_undated ?? 'n/a')}
     ${line('backend: withheld (non-ACTIVE crops)', s.non_active_cohorts ?? 'n/a')}
     ${line('backend: greenhouse destination', s.greenhouse_cohorts_total ?? 'n/a')}
+    ${withheldCauseHTML_(line)}
   </div>`;
 }
 
