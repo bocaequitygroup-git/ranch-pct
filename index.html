@@ -529,7 +529,8 @@ function getStage(c, asOf){
   if(asOf < c.dob) return 'planned';
   if(!c.harvest_ready) return 'growing';
   if(asOf < c.harvest_ready) return 'growing';
-  const hEnd = addDays(c.harvest_ready, harvestWindowDays(c.pattern));
+  // real per-crop harvest length from CROP_PRODUCTION_MASTER; pattern default only if absent
+  const hEnd = addDays(c.harvest_ready, (typeof c.harvest_window_days === 'number' && c.harvest_window_days >= 0) ? c.harvest_window_days : harvestWindowDays(c.pattern));
   if(asOf <= hEnd) return 'harvesting';
   return 'complete';
 }
@@ -779,7 +780,6 @@ function renderPipelineTable(){
     if(bv===null||bv===undefined) bv = '';
     if(av<bv) return -1*dir; if(av>bv) return 1*dir; return 0;
   });
-  rows = rows.slice(0, 40);
 
   const cols = [
     ['crop','Crop'], ['wave','Wave'], ['dob','DOB'], ['method','Method'],
@@ -847,7 +847,9 @@ function el_delegate(container, selector, fn){
 function computeAlerts(){
   const critical = [], warning = [], info = [];
   CROPS.forEach(crop => {
-    if(crop.has_window && crop.valid_waves > 0 && crop.valid_waves < crop.min_waves){
+    if(crop.valid_waves === 0){
+      warning.push({ title: `${crop.crop}: no waves scheduled`, detail: `No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date · Data status: ${crop.data_status}`, crop: crop.crop_id, level:'warning' });
+    } else if(crop.has_window && crop.valid_waves < crop.min_waves){
       critical.push({ title: `${crop.crop} has fewer than ${crop.min_waves} scheduled waves`, detail: `${crop.valid_waves} of ${crop.min_waves} minimum waves scheduled`, crop: crop.crop_id, level:'critical' });
     }
     if(crop.outside_window_waves > 0){
