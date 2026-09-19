@@ -502,6 +502,19 @@ const METHOD_LABEL = {
   'SETT': 'Sett Planting'
 };
 let SUMMARY = null; // backend window-evaluation totals (see ControlTowerAPI.gs ctBuildDataset_)
+let RECON = null;   // backend master-data reconciliation (roster vs lifecycle vs production master vs cohorts)
+
+// CROP_REFERENCE is the roster authority. Only an ACTIVE crop feeds a dashboard number; a DISPUTED /
+// PROCUREMENT_ONLY / RETIRED / not-in-roster crop stays visible but is never counted or scheduled.
+// (An older backend sends no operational_status -- treat that as active so nothing disappears.)
+function isActiveCrop(c){ return !c.operational_status || c.operational_status === 'ACTIVE'; }
+// Scheduled waves in ANY destination (field + greenhouse). valid_waves is field only.
+function cropScheduledTotal(c){ return c.scheduled_waves_total !== undefined ? c.scheduled_waves_total : c.valid_waves; }
+function statusBadge(c){
+  if(isActiveCrop(c)) return '';
+  const label = String(c.operational_status || '').replace(/_/g,' ');
+  return `<span class="badge win-out" title="Not an ACTIVE production crop -- see Alerts (master data)">${label}</span>`;
+}
 
 // ============ DATE HELPERS ============
 const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -633,12 +646,16 @@ function computeKPIs(asOf){
   const outsideCrops = new Set(outsideWaves.map(c=>c.crop_id)).size;
   const recon = windowRecon(scheduled);
   const facilityChecks = scheduled.filter(c => prodAnomaly(c)).length;
-  const noWaves = CROPS.filter(c => c.valid_waves === 0).length;
+  // ACTIVE crops with no dated COHORT_PRODUCTION row anywhere (field OR greenhouse). A greenhouse-only
+  // crop whose waves are all in the greenhouse is scheduled, just not on this dashboard.
+  const noWaves = CROPS.filter(c => isActiveCrop(c) && cropScheduledTotal(c) === 0).length;
+  const rosterActive = CROPS.filter(isActiveCrop).length, rosterTotal = CROPS.length;
   const al = computeAlerts();
   const alertCrops = alertCropIds(al).length;
   const missingWindow = CROPS.filter(c => c.window_kind==='NONE' || c.window_kind==='UNPARSEABLE').length;
   return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, greenhouseWaves, harvestingNow, ready7, ready14,
-           outsideWindow, outsideCrops, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow };
+           outsideWindow, outsideCrops, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow,
+           rosterActive, rosterTotal };
 }
 
 // ============ RENDER: TOP CONTROLS ============
@@ -671,7 +688,7 @@ function renderDashboard(){
   el.innerHTML = `
     <div class="kpi-groups">
       ${kpiGroup('Field Production \u2014 every wave is counted once: field direct + field via GH-PROP. Greenhouse (GH-FULL) is out of scope for this dashboard.', 4, [
-        kpiCell(k.activeCrops,'Crops Scheduled','','activeCrops','of '+CROPS.length+' in crop master'),
+        kpiCell(k.activeCrops,'Crops Scheduled','','activeCrops','of '+k.rosterActive+' active crops'+(k.rosterTotal>k.rosterActive ? ' \u00b7 '+(k.rosterTotal-k.rosterActive)+' not active' : '')),
         kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years, field only'),
         kpiCell(k.fieldCohorts,'Field Production \u00b7 Direct','','fieldCohorts','sown directly in a field block'),
         kpiCell(k.ghCohorts,'Field Production \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to a field block')
@@ -685,11 +702,12 @@ function renderDashboard(){
         kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow','in '+k.outsideCrops+' crop'+(k.outsideCrops===1?'':'s')),
         kpiCell(k.startsOverdue,'Planned \u00b7 Start Date Passed','warn','startsOverdue','still PLANNED, not dispatched'),
         kpiCell(k.alertCrops,'Alert Crops','warn','alertCrops','crops needing attention'),
-        kpiCell(k.noWaves,'Crops Without Scheduled Waves','warn','noWaves','no COHORT_PRODUCTION row'),
+        kpiCell(k.noWaves,'Crops Without Scheduled Waves','warn','noWaves','active, no dated cohort (field or greenhouse)'),
         kpiCell(k.missingWindow,'Crops Missing Window Data','warn','missingWindow')
       ])}
     </div>
     ${reconHTML(k)}
+    ${masterReconHTML()}
     ${sourceLineHTML()}
 
     <div class="panel">
@@ -726,6 +744,7 @@ function renderDashboard(){
   renderDashboardAlertPreview(alerts);
   document.querySelectorAll('.kpi-grid').forEach(g => el_delegate(g, '.kpi', el => openKpiModal(el.dataset.kpi)));
   el_delegate(document.getElementById('view-dashboard'), '.recon-link', el => openKpiModal(el.dataset.kpi));
+  el_delegate(document.getElementById('view-dashboard'), '.recon-jump', () => document.querySelector('#mainNav button[data-tab="alerts"]').click());
 }
 
 function sourceLineHTML(){
@@ -772,6 +791,35 @@ function reconHTML(k){
     ${r.other ? ` \u00b7 <span class="bad">${r.other} without an evaluation code</span>` : ''}
     ${k.facilityChecks ? `<br><span class="amb recon-link" data-kpi="facilityCheck">\u26a0 ${k.facilityChecks} wave${k.facilityChecks===1?'':'s'} with a facility / phase conflict</span>` : ''}
     ${k.greenhouseWaves ? `<br><span style="color:var(--text-faint);">${k.greenhouseWaves} greenhouse (GH-FULL) wave${k.greenhouseWaves===1?'':'s'} excluded from this field dashboard \u2014 not counted above, not "exempt"</span>` : ''}
+  </div>`;
+}
+
+// Crop master reconciliation: CROP_REFERENCE (roster) vs CROP_LIFECYCLE vs CROP_PRODUCTION_MASTER vs
+// scheduled cohorts, so a crop can never quietly fall out of the count (the old silent 36-of-39).
+// Numbers come straight from the backend's `reconciliation`; nothing is recomputed here.
+function masterReconHTML(){
+  if(!RECON) return '';
+  if(RECON.error) return `<div class="recon"><b>Crop master reconciliation</b> \u2014 <span class="bad">${RECON.error}</span></div>`;
+  const r = RECON, st = r.by_operational_status || {};
+  const nonActive = Object.keys(st).filter(k => k !== 'ACTIVE').map(k => st[k] + ' ' + k.toLowerCase().replace(/_/g,' '));
+  const unschedActive = (r.unscheduled || []).filter(u => u.operational_status === 'ACTIVE');
+  const unschedOther = (r.unscheduled || []).filter(u => u.operational_status !== 'ACTIVE');
+  const list = a => a.map(u => u.crop).join(', ');
+  const ic = r.issue_counts || {critical:0, warning:0, info:0};
+  const match = (n) => n === r.roster_count ? `<span class="ok">${n}</span>` : `<span class="bad">${n}</span>`;
+  const nir = r.not_in_roster || {}, nirN = new Set([...(nir.lifecycle||[]), ...(nir.production_master||[]), ...(nir.cohorts||[])]).size;
+  return `<div class="recon"><b>Crop master reconciliation</b> \u2014 roster authority <b>${r.roster_authority}</b>
+    <br>${r.roster_count} crops in roster: <b>${r.active_crops} active</b>${nonActive.length ? ' \u00b7 <span class="amb">' + nonActive.join(' \u00b7 ') + '</span>' : ''}
+    \u00b7 in CROP_LIFECYCLE ${match(r.in_lifecycle)} \u00b7 in CROP_PRODUCTION_MASTER ${match(r.in_production_master)}
+    \u00b7 with scheduled cohorts (field or greenhouse) ${r.crops_with_cohorts}
+    ${unschedActive.length ? `<br><span class="amb recon-link" data-kpi="noWaves">\u26a0 ${unschedActive.length} active crop${unschedActive.length===1?'':'s'} with no scheduled cohort: ${list(unschedActive)}</span>` : ''}
+    ${unschedOther.length ? `<br><span style="color:var(--text-faint);">Not active, not scheduled (not counted anywhere): ${unschedOther.map(u => u.crop + ' [' + u.operational_status.toLowerCase().replace(/_/g,' ') + ']').join(', ')}</span>` : ''}
+    ${nirN ? `<br><span class="bad">${nirN} crop${nirN===1?'':'s'} in a crop tab but not in CROP_REFERENCE</span>` : ''}
+    ${r.non_active_cohorts ? `<br><span class="bad">${r.non_active_cohorts} cohort row${r.non_active_cohorts===1?'':'s'} on non-active crops withheld from every count</span>` : ''}
+    <br>Master-data issues: ${ic.critical ? `<span class="bad recon-jump recon-link">${ic.critical} critical</span>` : '0 critical'} \u00b7
+    <span class="${ic.warning ? 'amb recon-jump recon-link' : ''}">${ic.warning} warning</span> \u00b7
+    <span class="${ic.info ? 'recon-jump recon-link' : ''}">${ic.info} info</span>
+    <span style="color:var(--text-faint);">\u2014 open Alerts for the list</span>
   </div>`;
 }
 
@@ -881,7 +929,7 @@ function kpiDrilldown_(key, asOf){
     case 'startsOverdue':
       return { type:'cohorts', title:'Planned \u00b7 Start Date Passed (still PLANNED, not dispatched)', items: scheduled.filter(c=>startOverdue(c, asOf)) };
     case 'noWaves':
-      return { type:'crops', title:'Crops Without Scheduled Waves', items: CROPS.filter(c=>c.valid_waves===0) };
+      return { type:'crops', title:'Active Crops Without Scheduled Waves (no dated cohort in the field or the greenhouse)', items: CROPS.filter(c=>isActiveCrop(c) && cropScheduledTotal(c)===0) };
     case 'harvestingNow':
       return { type:'cohorts', title:'Harvesting Now', items: scheduled.filter(c=>getStage(c,asOf)==='harvesting') };
     case 'ready7':
@@ -936,7 +984,7 @@ function openKpiModal(key){
               <td>${c.crop}</td>
               <td>${c.group}</td>
               <td>${methodBadge(c.method)}</td>
-              <td>${c.data_status || '—'}</td>
+              <td>${c.data_status || '—'}${isActiveCrop(c) ? '' : ' \u00b7 ' + statusBadge(c)}</td>
               <td>${c.window_label || '—'}</td>
             </tr>
           `).join('')}
@@ -1078,6 +1126,8 @@ function alertsGroupedHTML(alerts, includeData){
   const cov = all.filter(a => a.kind === 'coverage');
   const noplan = all.filter(a => a.kind === 'noplan');
   const data = all.filter(a => a.kind === 'data');
+  // Info-level master items (e.g. zoning sheet is the legacy side) show only in the full Alerts tab, like NEEDS DATA.
+  const master = all.filter(a => a.kind === 'master' && (includeData || a.level !== 'info'));
   const exc = windowExceptionRows();
   const excCrops = new Set(exc.map(c => c.crop_id)).size;
 
@@ -1125,13 +1175,44 @@ function alertsGroupedHTML(alerts, includeData){
       <h3 style="color:var(--blue)">CROPS WITHOUT SCHEDULED WAVES \u00b7 ${noplan.length}</h3>
       ${noplanTable}
     </div>
+    ${masterGroupHTML(master)}
     ${includeData && data.length ? `<div class="alert-group">
       <h3 style="color:var(--text-dim)">NEEDS DATA \u00b7 ${data.length}</h3>
       <div class="alert-list">${data.map(alertItemHTML).join('')}</div>
     </div>` : ''}`;
 }
+// Master-data reconciliation, grouped by what kind of conflict it is. Authority: CROP_REFERENCE = roster,
+// CROP_LIFECYCLE = how a crop is grown, CROP_ZONING_REFERENCE = physical layout (never overrides lifecycle),
+// COHORT_PRODUCTION = execution (can never override lifecycle).
+const MASTER_GROUPS = [
+  ['INVALID_DESTINATION',              'Invalid destination \u2014 a field cohort on a GREENHOUSE-ONLY crop (lifecycle wins; fix the cohort)'],
+  ['DISPUTED_CROP',                    'Disputed crops \u2014 master data review required (not counted as active production)'],
+  ['NON_ACTIVE_HAS_COHORTS',           'Cohort rows on a crop that is not active \u2014 withheld from every count'],
+  ['NOT_IN_ROSTER',                    'Crop not in the CROP_REFERENCE roster'],
+  ['INVALID_STATUS',                   'Unrecognised Crop_Operational_Status'],
+  ['MISSING_FROM_LIFECYCLE',           'Active crop with no CROP_LIFECYCLE row'],
+  ['MISSING_FROM_PRODUCTION_MASTER',   'Active crop with no CROP_PRODUCTION_MASTER row'],
+  ['MISSING_ZONING',                   'Missing zoning \u2014 active field crop with no block assignment'],
+  ['ZONING_LIFECYCLE_CONFLICT',        'Zoning vs lifecycle \u2014 lifecycle governs; update the zoning sheet later'],
+  ['CROP_NOT_ACTIVE',                  'Crops marked not active'],
+  ['ZONING_UNAVAILABLE',               'Zoning checks skipped']
+];
+function masterGroupHTML(items){
+  const nCrit = items.filter(a => a.level === 'critical').length;
+  const color = nCrit ? 'var(--red)' : (items.some(a => a.level === 'warning') ? 'var(--amber)' : 'var(--text-dim)');
+  const body = items.length ? MASTER_GROUPS.map(([code, label]) => {
+    const g = items.filter(a => a.code === code);
+    return g.length ? `<div class="alert-section-sub" style="margin-top:10px;">${label} \u00b7 ${g.length}</div>
+      <div class="alert-list">${g.map(alertItemHTML).join('')}</div>` : '';
+  }).join('') : '<div class="empty">None.</div>';
+  return `<div class="alert-group">
+      <h3 style="color:${color}">MASTER DATA RECONCILIATION \u00b7 ${items.length}</h3>
+      <div class="alert-section-sub">Roster: CROP_REFERENCE \u00b7 method &amp; field-vs-greenhouse: CROP_LIFECYCLE \u00b7 layout: CROP_ZONING_REFERENCE \u00b7 execution: COHORT_PRODUCTION (never overrides lifecycle).</div>
+      ${body}
+    </div>`;
+}
 function wireAlertClicks(container){
-  el_delegate(container, '.alert-item', el => { if(el.dataset.crop) openCropDetail(el.dataset.crop); });
+  el_delegate(container, '.alert-item', el => { if(el.dataset.key) openCohortModal(el.dataset.key); else if(el.dataset.crop) openCropDetail(el.dataset.crop); });
   el_delegate(container, 'tr.exc-row', el => openCohortModal(el.dataset.key));
   el_delegate(container, 'tr.noplan-row', el => openCropDetail(el.dataset.crop));
 }
@@ -1168,15 +1249,23 @@ function el_delegate(container, selector, fn){
 // ============ ALERTS COMPUTATION ============
 function computeAlerts(){
   // `level` (critical/warning/info) drives the alert-crop count; `kind` drives how the
-  // alerts are grouped on screen: window | coverage | noplan | data.
+  // alerts are grouped on screen: window | coverage | noplan | data | master.
   const critical = [], warning = [], info = [];
   CROPS.forEach(crop => {
-    if(crop.window_kind === 'GREENHOUSE_ONLY') return; // no field wave is expected here -- not a field-dashboard concern
-    if(crop.valid_waves === 0){
+    // A DISPUTED / not-in-roster crop is not production: it is reported once, as a master-data issue
+    // below, and raises no production alert (coverage, window, no-plan) of its own.
+    if(!isActiveCrop(crop)) return;
+    const total = cropScheduledTotal(crop);
+    // older backend (no scheduled_waves_total): a greenhouse-only crop has no field wave to expect
+    if(crop.scheduled_waves_total === undefined && crop.window_kind === 'GREENHOUSE_ONLY') return;
+    if(total === 0){
+      // no dated cohort in the field OR the greenhouse -- includes a greenhouse-only crop (OKR, SWP) that
+      // was never scheduled at all. A crop whose waves all sit in the greenhouse IS scheduled.
       warning.push({ kind:'noplan', title: `${crop.crop}: no scheduled waves`, detail: `No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date \u00b7 Status: ${crop.data_status}`, crop: crop.crop_id, level:'warning' });
-    } else if(crop.has_window && crop.valid_waves < crop.min_waves){
+    } else if(crop.window_kind !== 'GREENHOUSE_ONLY' && crop.valid_waves > 0 && crop.has_window && crop.valid_waves < crop.min_waves){
       critical.push({ kind:'coverage', title: `${crop.crop} has fewer than ${crop.min_waves} scheduled waves`, detail: `${crop.valid_waves} of ${crop.min_waves} minimum waves scheduled`, crop: crop.crop_id, level:'critical' });
     }
+    if(crop.window_kind === 'GREENHOUSE_ONLY') return; // no field window exists to check waves against
     if(crop.outside_window_waves > 0){
       warning.push({ kind:'window', title: `${crop.crop}: ${crop.outside_window_waves} wave${crop.outside_window_waves>1?'s':''} scheduled outside the allowable planting window`, detail: `Window: ${crop.window_label}`, crop: crop.crop_id, level:'warning' });
     }
@@ -1186,13 +1275,25 @@ function computeAlerts(){
       info.push({ kind:'data', title: `${crop.crop}: planting window could not be read`, detail: `CROP_LIFECYCLE says "${crop.window_label}" \u2014 fix the text so waves can be checked`, crop: crop.crop_id, level:'info' });
     }
   });
+  // Master-data reconciliation issues, straight from the backend. MISSING_COHORTS is skipped here only
+  // because the noplan alert above already IS that check (same crops); it is not hidden.
+  masterIssues().forEach(i => {
+    const item = { kind:'master', code:i.code, title:i.title, detail:i.detail, crop:i.crop_id, cohort:i.cohort_id, level:i.severity };
+    (i.severity === 'critical' ? critical : i.severity === 'warning' ? warning : info).push(item);
+  });
   return { critical, warning, info };
+}
+function masterIssues(){
+  return (RECON && RECON.issues ? RECON.issues : []).filter(i => i.code !== 'MISSING_COHORTS');
 }
 // Distinct crops behind the critical + warning items (one crop can raise several items)
 function alertCropIds(a){ return Array.from(new Set([...a.critical, ...a.warning].map(x=>x.crop))); }
 
 function alertItemHTML(a){
-  return `<div class="alert-item ${a.level}" data-crop="${a.crop}">
+  // a cohort-level issue opens that wave; a crop-level one opens the crop; a roster-level one (no crop) does neither
+  const wave = a.cohort ? COHORTS.find(c => c.cohort_id === a.cohort) : null;
+  const crop = a.crop && cropById[a.crop] ? a.crop : '';
+  return `<div class="alert-item ${a.level}" data-crop="${crop}" ${wave ? `data-key="${wave.key}"` : ''}>
     <div class="title">${a.title}</div>
     <div class="detail">${a.detail}</div>
   </div>`;
@@ -1320,8 +1421,8 @@ function renderCropsList(){
         ${groups[g].map(c => `
           <div class="crop-card" data-crop="${c.crop_id}">
             <div class="name">${c.crop}</div>
-            <div class="meta">${methodBadge(c.method)} ${cropWindowBadge(c)}</div>
-            <div class="waves">${c.valid_waves} / ${c.total_slots} waves scheduled ${c.window_kind==='FIELD' ? '· window: '+c.window_label : (c.window_kind==='GREENHOUSE_ONLY' ? '· greenhouse only' : '· no planting window')}</div>
+            <div class="meta">${methodBadge(c.method)} ${cropWindowBadge(c)} ${statusBadge(c)}</div>
+            <div class="waves">${isActiveCrop(c) ? `${c.valid_waves} / ${c.total_slots} field waves scheduled${c.greenhouse_waves ? ' · '+c.greenhouse_waves+' in greenhouse' : ''}` : 'not counted \u2014 '+String(c.operational_status).toLowerCase().replace(/_/g,' ')+(c.excluded_waves ? ' ('+c.excluded_waves+' cohort rows withheld)' : '')} ${c.window_kind==='FIELD' ? '· window: '+c.window_label : (c.window_kind==='GREENHOUSE_ONLY' ? '· greenhouse only' : '· no planting window')}</div>
           </div>
         `).join('')}
       </div>
@@ -1362,12 +1463,14 @@ function openCropDetail(cropId){
         <div class="sumbox"><div class="k">MINIMUM WAVES</div><div class="v">${crop.min_waves}</div></div>
         <div class="sumbox"><div class="k">SCHEDULED WAVES</div><div class="v">${crop.valid_waves} / ${crop.total_slots}</div></div>
         <div class="sumbox"><div class="k">DATA STATUS</div><div class="v" style="font-size:12.5px;">${crop.data_status}</div></div>
+        ${crop.operational_status !== undefined ? `<div class="sumbox"><div class="k">OPERATIONAL STATUS</div><div class="v" style="font-size:12.5px;">${String(crop.operational_status).replace(/_/g,' ')}${crop.zoning_blocks && crop.zoning_blocks.length ? ' \u00b7 zoned ' + crop.zoning_blocks.join(', ') : ''}</div></div>` : ''}
         <div class="sumbox"><div class="k">NEXT DOB</div><div class="v">${fmtShortY(nextEventAfter(rows,'dob',state.asOf))}</div></div>
         <div class="sumbox"><div class="k">NEXT HARVEST READY</div><div class="v">${fmtShortY(nextEventAfter(rows,'harvest_ready',state.asOf))}</div></div>
         <div class="sumbox"><div class="k">HARVEST PATTERN</div><div class="v" style="font-size:12.5px;">${crop.pattern}</div></div>
         <div class="sumbox"><div class="k">SUCCESSION INTERVAL</div><div class="v">${rows[0]?.succession_interval||'—'} days</div></div>
       </div>
 
+      ${cropIssuesHTML(cropId)}
       <div id="cropTimelineWrap" style="margin-bottom:18px;"></div>
 
       <table>
@@ -1391,6 +1494,16 @@ function openCropDetail(cropId){
   document.getElementById('backToCrops').addEventListener('click', renderCropsView);
   el_delegate(el, 'tr.rowlink', e => openCohortModal(e.dataset.key));
   renderCropMiniTimeline(rows, spanStart, totalSpan);
+}
+
+// Every master-data issue the backend raised against this crop (all severities, MISSING_COHORTS included).
+function cropIssuesHTML(cropId){
+  const list = (RECON && RECON.issues ? RECON.issues : []).filter(i => i.crop_id === cropId);
+  if(!list.length) return '';
+  const color = { critical:'var(--red)', warning:'var(--amber)', info:'var(--blue)' };
+  return `<div class="recon" style="margin-top:0;"><b>Master data</b> \u2014 ${list.length} issue${list.length===1?'':'s'} on this crop
+    ${list.map(i => `<br><span style="color:${color[i.severity]};">\u25cf ${i.severity.toUpperCase()}</span> ${i.title}<br><small style="color:var(--text-faint);">${i.detail}</small>`).join('')}
+  </div>`;
 }
 
 function nextEventAfter(rows, field, asOf){
@@ -1647,6 +1760,7 @@ function showBackendWarning(msg){
 function applyDataset(data){
   SOURCE = data.source || null;
   SUMMARY = data.summary || null;
+  RECON = data.reconciliation || null;
   COHORTS = data.cohorts;
   CROPS = data.crops;
   indexData();
