@@ -129,6 +129,29 @@
   .kpi.good .n{ color: var(--green); }
   .kpi.info .n{ color: var(--blue); }
 
+  /* ---------- KPI GROUPS / RECON / EXCEPTIONS ---------- */
+  .kpi-groups{ margin-bottom: 20px; }
+  .kpi-group{ margin-bottom: 12px; }
+  .kpi-group-label{ font-size:11.5px; font-weight:600; color: var(--text-dim); margin: 0 2px 6px; }
+  .kpi-group .kpi-grid{ grid-template-columns: repeat(var(--cols,4), 1fr); margin-bottom:0; }
+  @media (max-width: 1100px){ .kpi-group .kpi-grid{ grid-template-columns: repeat(3, 1fr);} }
+  .recon{
+    font-size:12.5px; line-height:1.7; color: var(--text-dim);
+    background: var(--panel); border:1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 14px; margin: 0 0 14px;
+  }
+  .recon b{ color: var(--text); }
+  .recon .recon-link{ cursor:pointer; border-bottom:1px dotted var(--text-faint); }
+  .recon .recon-link:hover{ color: var(--text); }
+  .recon .ok{ color: var(--green); }
+  .recon .bad{ color: var(--red); }
+  .recon .amb{ color: var(--amber); }
+  .prod-sub{ display:block; font-size:10.5px; color: var(--text-faint); font-family: var(--sans); }
+  .prod-flag{ color: var(--amber); cursor: help; }
+  .exc-wrap{ overflow-x:auto; }
+  .exc-table td.exc{ color: var(--red); font-family: var(--mono); font-size:11.5px; white-space:nowrap; }
+  .alert-section-sub{ font-size:11.5px; color: var(--text-faint); margin: -2px 0 8px; }
+
   /* ---------- PANELS ---------- */
   .panel{
     background: var(--panel); border:1px solid var(--line); border-radius: var(--radius);
@@ -478,7 +501,6 @@ const METHOD_LABEL = {
   'CUTTING': 'Cutting Planting', 'CROWN': 'Crown Planting', 'SUCKER': 'Sucker Planting',
   'SETT': 'Sett Planting'
 };
-const PHASE_LABEL = { 'FIELD': 'Field', 'GH-PROP': 'GH-PROP (propagation for field transplant)', 'GH-FULL': 'GH-FULL (grown in greenhouse)' };
 let SUMMARY = null; // backend window-evaluation totals (see ControlTowerAPI.gs ctBuildDataset_)
 
 // ============ DATE HELPERS ============
@@ -594,12 +616,14 @@ function computeKPIs(asOf){
   const outsideWaves = scheduled.filter(c => c.window_check === 'OUTSIDE WINDOW');
   const outsideWindow = outsideWaves.length;
   const outsideCrops = new Set(outsideWaves.map(c=>c.crop_id)).size;
-  const notFieldChecked = scheduled.filter(c => c.window_eval && c.window_eval !== 'IN_WINDOW' && c.window_eval !== 'OUTSIDE_WINDOW').length;
+  const recon = windowRecon(scheduled);
+  const facilityChecks = scheduled.filter(c => prodAnomaly(c)).length;
+  const noWaves = CROPS.filter(c => c.valid_waves === 0).length;
   const al = computeAlerts();
   const alertCrops = alertCropIds(al).length;
   const missingWindow = CROPS.filter(c => c.window_kind==='NONE' || c.window_kind==='UNPARSEABLE').length;
   return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, ghFullCohorts, harvestingNow, ready7, ready14,
-           outsideWindow, outsideCrops, notFieldChecked, alertCrops, missingWindow };
+           outsideWindow, outsideCrops, recon, facilityChecks, noWaves, alertCrops, missingWindow };
 }
 
 // ============ RENDER: TOP CONTROLS ============
@@ -630,20 +654,27 @@ function renderDashboard(){
   const alerts = computeAlerts();
 
   el.innerHTML = `
-    <div class="kpi-grid">
-      ${kpiCell(k.activeCrops,'Crops With Waves','','activeCrops','of '+CROPS.length+' in crop master')}
-      ${kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years')}
-      ${kpiCell(k.fieldCohorts,'Field-Phase Waves','','fieldCohorts','planted in the field')}
-      ${kpiCell(k.ghCohorts,'GH-PROP Waves','info','ghCohorts','propagation \u2192 field transplant')}
-      ${kpiCell(k.ghFullCohorts,'GH-FULL Waves','','ghFullCohorts','grown in greenhouse')}
-      ${kpiCell(k.harvestingNow,'Harvesting Now','good','harvestingNow')}
-      ${kpiCell(k.ready7,'Harvest Ready ≤ 7 Days','warn','ready7')}
-      ${kpiCell(k.ready14,'Harvest Ready 8–14 Days','','ready14')}
-      ${kpiCell(k.alertCrops,'Alert Crops','warn','alertCrops','crops needing attention')}
-      ${kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow','in '+k.outsideCrops+' crop'+(k.outsideCrops===1?'':'s'))}
-      ${kpiCell(k.notFieldChecked,'Waves Not Field-Checked','','notFieldChecked','GH-FULL \u00b7 greenhouse-only \u00b7 no window')}
-      ${kpiCell(k.missingWindow,'Crops Missing Window Data','warn','missingWindow')}
+    <div class="kpi-groups">
+      ${kpiGroup('Production', 5, [
+        kpiCell(k.activeCrops,'Crops Scheduled','','activeCrops','of '+CROPS.length+' in crop master'),
+        kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years'),
+        kpiCell(k.fieldCohorts,'Field \u00b7 Direct','','fieldCohorts','planted directly in the field'),
+        kpiCell(k.ghCohorts,'Field \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to field'),
+        kpiCell(k.ghFullCohorts,'GH-FULL Production','','ghFullCohorts','grown in greenhouse')
+      ])}
+      ${kpiGroup('Harvest', 3, [
+        kpiCell(k.harvestingNow,'Harvesting Now','good','harvestingNow'),
+        kpiCell(k.ready7,'Harvest Ready \u2264 7 Days','warn','ready7'),
+        kpiCell(k.ready14,'Harvest Ready 8\u201314 Days','','ready14')
+      ])}
+      ${kpiGroup('Control', 4, [
+        kpiCell(k.outsideWindow,'Waves Outside Window','alert','outsideWindow','in '+k.outsideCrops+' crop'+(k.outsideCrops===1?'':'s')),
+        kpiCell(k.alertCrops,'Alert Crops','warn','alertCrops','crops needing attention'),
+        kpiCell(k.noWaves,'Crops Without Scheduled Waves','warn','noWaves','no COHORT_PRODUCTION row'),
+        kpiCell(k.missingWindow,'Crops Missing Window Data','warn','missingWindow')
+      ])}
     </div>
+    ${reconHTML(k)}
     ${sourceLineHTML()}
 
     <div class="panel">
@@ -665,7 +696,7 @@ function renderDashboard(){
     <div class="panel">
       <div class="panel-head">
         <h2>ALERTS SUMMARY</h2>
-        <span class="sub">${alertCropIds(alerts).length} crops with alerts \u00b7 ${k.outsideWindow} waves outside window (in ${k.outsideCrops} crops) \u00b7 ${CROPS.filter(c=>c.valid_waves===0).length} crops with no waves</span>
+        <span class="sub">${alertCropIds(alerts).length} crops with alerts \u00b7 ${k.outsideWindow} waves outside window (in ${k.outsideCrops} crops) \u00b7 ${k.noWaves} crops without scheduled waves</span>
       </div>
       <div class="alert-list" id="dashAlertPreview"></div>
     </div>
@@ -673,7 +704,8 @@ function renderDashboard(){
   renderTodayPanel();
   renderPipelineTable();
   renderDashboardAlertPreview(alerts);
-  el_delegate(document.querySelector('.kpi-grid'), '.kpi', el => openKpiModal(el.dataset.kpi));
+  document.querySelectorAll('.kpi-grid').forEach(g => el_delegate(g, '.kpi', el => openKpiModal(el.dataset.kpi)));
+  el_delegate(document.getElementById('view-dashboard'), '.recon-link', el => openKpiModal(el.dataset.kpi));
 }
 
 function sourceLineHTML(){
@@ -687,6 +719,87 @@ function sourceLineHTML(){
     ${SUMMARY ? `<br><b>Planting-window check</b> \u2014 ${SUMMARY.cohorts_evaluated} of ${SUMMARY.cohorts_total} cohorts evaluated (${fmt(SUMMARY.by_window_eval)}).` : ''}
     Viewing date is real today; dates in the table below carry their year.
   </div>`;
+}
+
+function kpiGroup(label, cols, cells){
+  return `<div class="kpi-group"><div class="kpi-group-label">${label}</div><div class="kpi-grid" style="--cols:${cols}">${cells.join('')}</div></div>`;
+}
+
+// Every scheduled wave lands in exactly one bucket, so the line always adds up.
+function windowRecon(scheduled){
+  const n = code => scheduled.filter(c => c.window_eval === code).length;
+  const r = { total: scheduled.length, inW: n('IN_WINDOW'), out: n('OUTSIDE_WINDOW'),
+              ghFull: n('GH_FULL_EXEMPT'), ghOnly: n('GREENHOUSE_ONLY'),
+              noWin: n('NO_WINDOW'), bad: n('WINDOW_UNPARSEABLE') };
+  r.exempt = r.ghFull + r.ghOnly;
+  r.unchecked = r.noWin + r.bad;                 // a data gap, NOT an exemption
+  r.other = r.total - (r.inW + r.out + r.exempt + r.unchecked);
+  return r;
+}
+function reconHTML(k){
+  const r = k.recon;
+  const parts = [];
+  if(r.ghFull) parts.push(r.ghFull + ' GH-FULL');
+  if(r.ghOnly) parts.push(r.ghOnly + ' greenhouse-only');
+  return `<div class="recon"><b>Field-window check</b> \u2014 ${r.total} waves:
+    <span class="ok">${r.inW} in window</span> \u00b7
+    <span class="bad recon-link" data-kpi="outsideWindow">${r.out} outside window</span> \u00b7
+    <span class="recon-link" data-kpi="exemptWindow">${r.exempt} exempt from field-window check${parts.length ? ' ('+parts.join(' \u00b7 ')+')' : ''}</span>
+    ${r.unchecked ? ` \u00b7 <span class="bad recon-link" data-kpi="uncheckedWindow">${r.unchecked} unchecked \u2014 no usable window data</span>` : ''}
+    ${r.other ? ` \u00b7 <span class="bad">${r.other} without an evaluation code</span>` : ''}
+    ${k.facilityChecks ? `<br><span class="amb recon-link" data-kpi="facilityCheck">\u26a0 ${k.facilityChecks} wave${k.facilityChecks===1?'':'s'} with a facility / phase conflict</span>` : ''}
+  </div>`;
+}
+
+// ============ PRODUCTION MODEL (location vs phase vs propagation) ============
+// GH-PROP is a propagation PATH, not a place: the crop is propagated in a
+// greenhouse and then produced in the field (DOB = its field transplant date).
+// So we show WHERE it is produced (Assigned_Facility), the production PHASE,
+// and the propagation path separately.
+function isFieldFacility(f){ return !!f && /^(BLK|B\d|Z\d)/i.test(String(f)); }
+function prodPhase(c){
+  const ph = c.facility_phase;
+  if(ph === 'GH-PROP') return isFieldFacility(c.facility) ? 'FIELD' : 'GH-PROP'; // 'GH-PROP' here = unresolved, see prodAnomaly
+  return ph || null;
+}
+function propPath(c){
+  if(!c.in_gh_prop) return null;
+  return isFieldFacility(c.facility) ? 'GH-PROP \u2192 FIELD' : 'GH-PROP';
+}
+function prodAnomaly(c){
+  if(c.in_gh_prop && !isFieldFacility(c.facility))
+    return 'Marked GH-PROP (propagation for a field transplant) but assigned to a non-field facility (' + (c.facility || 'none') + '). Confirm where this wave is produced.';
+  if(c.in_gh_prop && c.method === 'DIRECT')
+    return 'Direct-sown crop marked GH-PROP (propagation for a transplant). Confirm Facility_Phase.';
+  return null;
+}
+function prodCellHTML(c){
+  const warn = prodAnomaly(c), ph = prodPhase(c), path = propPath(c);
+  return `${c.facility || '\u2014'}${ph ? ' \u00b7 ' + ph : ''}` +
+    (warn ? ` <span class="prod-flag" title="${warn.replace(/"/g,'&quot;')}">\u26a0</span>` : '') +
+    (path ? `<small class="prod-sub">${path}</small>` : '');
+}
+
+// Days from a DOB to the nearest allowable-window edge ('MM-DD' segments, wrap-safe).
+function windowGap_(dob, segs){
+  const d = pd(dob), y = d.getFullYear();
+  let best = null;
+  (segs || []).forEach(sg => {
+    const [sm, sd] = sg.start.split('-').map(Number), [em, ed] = sg.end.split('-').map(Number);
+    const wraps = sm > em || (sm === em && sd > ed);
+    for(let yy = y - 1; yy <= y + 1; yy++){
+      const start = new Date(yy, sm - 1, sd), end = new Date(wraps ? yy + 1 : yy, em - 1, ed);
+      let gap, dir;
+      if(d < start){ gap = Math.round((start - d) / 864e5); dir = 'before'; }
+      else if(d > end){ gap = Math.round((d - end) / 864e5); dir = 'after'; }
+      else continue;
+      if(!best || gap < best.gap) best = { gap, dir };
+    }
+  });
+  return best;
+}
+function windowExceptionRows(){
+  return COHORTS.filter(c => c.dob && c.window_check === 'OUTSIDE WINDOW').sort((a,b) => a.dob < b.dob ? -1 : a.dob > b.dob ? 1 : 0);
 }
 
 function kpiCell(n, label, cls, key, sub){
@@ -705,15 +818,21 @@ function kpiDrilldown_(key, asOf){
     case 'totalCohorts':
       return { type:'cohorts', title:'Active Cohorts / Waves', items: scheduled };
     case 'fieldCohorts':
-      return { type:'cohorts', title:'Field-Phase Cohorts', items: scheduled.filter(c=>c.facility_phase==='FIELD') };
+      return { type:'cohorts', title:'Field Production \u2014 direct in the field', items: scheduled.filter(c=>c.facility_phase==='FIELD') };
     case 'ghCohorts':
-      return { type:'cohorts', title:'GH-PROP Cohorts (propagation for field transplant)', items: scheduled.filter(c=>c.in_gh_prop) };
+      return { type:'cohorts', title:'Field Production \u2014 via GH-PROP (propagated in greenhouse, transplanted to field)', items: scheduled.filter(c=>c.in_gh_prop) };
     case 'ghFullCohorts':
-      return { type:'cohorts', title:'GH-FULL Cohorts (grown in greenhouse)', items: scheduled.filter(c=>c.facility_phase==='GH-FULL') };
+      return { type:'cohorts', title:'GH-FULL Production (grown in greenhouse)', items: scheduled.filter(c=>c.facility_phase==='GH-FULL') };
     case 'alertCrops':
       return { type:'crops', title:'Crops With Alerts', items: alertCropIds(computeAlerts()).map(id=>cropById[id]).filter(Boolean) };
-    case 'notFieldChecked':
-      return { type:'cohorts', title:'Waves Not Field-Checked', items: scheduled.filter(c=>c.window_eval && c.window_eval !== 'IN_WINDOW' && c.window_eval !== 'OUTSIDE_WINDOW') };
+    case 'exemptWindow':
+      return { type:'cohorts', title:'Waves Exempt From Field-Window Check', items: scheduled.filter(c=>c.window_eval==='GH_FULL_EXEMPT' || c.window_eval==='GREENHOUSE_ONLY') };
+    case 'uncheckedWindow':
+      return { type:'cohorts', title:'Waves Unchecked \u2014 No Usable Window Data', items: scheduled.filter(c=>c.window_eval==='NO_WINDOW' || c.window_eval==='WINDOW_UNPARSEABLE') };
+    case 'facilityCheck':
+      return { type:'cohorts', title:'Waves With a Facility / Phase Conflict', items: scheduled.filter(c=>prodAnomaly(c)) };
+    case 'noWaves':
+      return { type:'crops', title:'Crops Without Scheduled Waves', items: CROPS.filter(c=>c.valid_waves===0) };
     case 'harvestingNow':
       return { type:'cohorts', title:'Harvesting Now', items: scheduled.filter(c=>getStage(c,asOf)==='harvesting') };
     case 'ready7':
@@ -742,14 +861,14 @@ function openKpiModal(key){
   if(cfg.type === 'cohorts'){
     rowsHtml = n ? `
       <table>
-        <thead><tr><th>Crop</th><th>Wave</th><th>DOB</th><th>Phase</th><th>Harvest Ready</th><th>Window</th><th>Stage</th></tr></thead>
+        <thead><tr><th>Crop</th><th>Wave</th><th>DOB</th><th>Production</th><th>Harvest Ready</th><th>Window</th><th>Stage</th></tr></thead>
         <tbody>
           ${cfg.items.map(c => `
             <tr class="rowlink" data-key="${c.key}">
               <td>${c.crop}</td>
               <td class="mono">${c.crop_id}-W${c.wave}</td>
               <td class="mono">${fmtShortY(c.dob)}</td>
-              <td>${phaseBadge(c)}</td>
+              <td class="mono">${prodCellHTML(c)}</td>
               <td class="mono">${fmtShortY(c.harvest_ready)}</td>
               <td>${windowBadge(c.window_check, c.window_eval)}</td>
               <td>${stageBadge(getStage(c, state.asOf))}</td>
@@ -761,13 +880,14 @@ function openKpiModal(key){
   } else {
     rowsHtml = n ? `
       <table>
-        <thead><tr><th>Crop</th><th>Group</th><th>Method</th><th>Planting Window</th></tr></thead>
+        <thead><tr><th>Crop</th><th>Group</th><th>Method</th><th>Status</th><th>Planting Window</th></tr></thead>
         <tbody>
           ${cfg.items.map(c => `
             <tr class="rowlink" data-crop="${c.crop_id}">
               <td>${c.crop}</td>
               <td>${c.group}</td>
               <td>${methodBadge(c.method)}</td>
+              <td>${c.data_status || '—'}</td>
               <td>${c.window_label || '—'}</td>
             </tr>
           `).join('')}
@@ -834,7 +954,7 @@ function renderPipelineTable(){
   });
 
   const cols = [
-    ['crop','Crop'], ['wave','Wave'], ['dob','DOB'], ['method','Method'], ['facility','Facility'],
+    ['crop','Crop'], ['wave','Wave'], ['dob','DOB'], ['method','Method'], ['facility','Production'],
     ['harvest_ready','Harvest Ready'], ['harvest_end','Harvest Ends'], ['daysToHarvest','Days to Harvest'], ['stage','Stage'], ['pipeline_status','Pipeline Status']
   ];
   document.getElementById('pipelineTableWrap').innerHTML = `
@@ -848,7 +968,7 @@ function renderPipelineTable(){
             <td class="mono">${r.crop_id}-W${r.wave}</td>
             <td class="mono">${fmtShortY(r.dob)}</td>
             <td>${methodBadge(r.method)}</td>
-            <td class="mono">${r.facility || '—'}${r.facility_phase ? ' <small>('+r.facility_phase+')</small>' : ''}</td>
+            <td class="mono">${prodCellHTML(r)}</td>
             <td class="mono">${fmtShortY(r.harvest_ready)}</td>
             <td class="mono">${fmtShortY(r.harvest_end)} <small>(${harvestWindowFor(r)}d${harvestWindowIsDefault(r)?' default':''})</small></td>
             <td class="mono">${r.daysToHarvest===null?'—':(r.daysToHarvest<0?'past':r.daysToHarvest)}</td>
@@ -871,23 +991,72 @@ function renderPipelineTable(){
 }
 
 function renderDashboardAlertPreview(alerts){
-  const top = [...alerts.critical, ...alerts.warning];
-  document.getElementById('dashAlertPreview').innerHTML = top.length ? top.map(alertItemHTML).join('') :
-    `<div class="empty">No active alerts.</div>`;
-  el_delegate(document.getElementById('dashAlertPreview'), '.alert-item', el => {
-    if(el.dataset.crop) openCropDetail(el.dataset.crop);
-  });
+  const box = document.getElementById('dashAlertPreview');
+  box.innerHTML = alertsGroupedHTML(alerts, false);
+  wireAlertClicks(box);
+}
+
+// Three separate concerns, never mixed: a planting-rule violation (wave level),
+// a coverage shortfall (crop level), and a crop with no production plan at all.
+function alertsGroupedHTML(alerts, includeData){
+  const all = [...alerts.critical, ...alerts.warning, ...alerts.info];
+  const cov = all.filter(a => a.kind === 'coverage');
+  const noplan = all.filter(a => a.kind === 'noplan');
+  const data = all.filter(a => a.kind === 'data');
+  const exc = windowExceptionRows();
+  const excCrops = new Set(exc.map(c => c.crop_id)).size;
+
+  const excTable = exc.length ? `<div class="exc-wrap"><table class="exc-table">
+      <thead><tr><th>Wave</th><th>Crop</th><th>DOB</th><th>Production</th><th>Allowable window</th><th>Exception</th></tr></thead>
+      <tbody>${exc.map(c => {
+        const crop = cropById[c.crop_id] || {};
+        const g = windowGap_(c.dob, crop.window_segments);
+        const gapTxt = g ? `${g.gap} day${g.gap===1?'':'s'} ${g.dir==='before' ? 'before window opens' : 'after window closes'}` : 'outside window';
+        return `<tr class="rowlink exc-row" data-key="${c.key}">
+          <td class="mono">${c.crop_id}-W${c.wave}</td>
+          <td>${c.crop}</td>
+          <td class="mono">${fmtShortY(c.dob)}</td>
+          <td class="mono">${prodCellHTML(c)}</td>
+          <td class="mono"><small>${fmtWindowSegments(crop.window_segments)}</small></td>
+          <td class="exc">${gapTxt}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>` : `<div class="empty">None.</div>`;
+
+  const noplanTable = noplan.length ? `<div class="exc-wrap"><table>
+      <thead><tr><th>Crop</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody>${noplan.map(a => {
+        const crop = cropById[a.crop] || {};
+        return `<tr class="rowlink noplan-row" data-crop="${a.crop}"><td>${crop.crop || a.crop}</td><td class="mono">${crop.data_status || '\u2014'}</td><td><small>No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date</small></td></tr>`;
+      }).join('')}</tbody></table></div>` : `<div class="empty">None.</div>`;
+
+  return `
+    <div class="alert-group">
+      <h3 style="color:var(--red)">WINDOW EXCEPTIONS \u00b7 ${exc.length} wave${exc.length===1?'':'s'} in ${excCrops} crop${excCrops===1?'':'s'}</h3>
+      <div class="alert-section-sub">Waves planted outside the crop's allowable field window \u2014 click a row for the wave.</div>
+      ${excTable}
+    </div>
+    <div class="alert-group">
+      <h3 style="color:var(--amber)">COVERAGE / WAVE COUNT \u00b7 ${cov.length} crop${cov.length===1?'':'s'} below minimum</h3>
+      <div class="alert-list">${cov.length ? cov.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
+    </div>
+    <div class="alert-group">
+      <h3 style="color:var(--blue)">CROPS WITHOUT SCHEDULED WAVES \u00b7 ${noplan.length}</h3>
+      ${noplanTable}
+    </div>
+    ${includeData && data.length ? `<div class="alert-group">
+      <h3 style="color:var(--text-dim)">NEEDS DATA \u00b7 ${data.length}</h3>
+      <div class="alert-list">${data.map(alertItemHTML).join('')}</div>
+    </div>` : ''}`;
+}
+function wireAlertClicks(container){
+  el_delegate(container, '.alert-item', el => { if(el.dataset.crop) openCropDetail(el.dataset.crop); });
+  el_delegate(container, 'tr.exc-row', el => openCohortModal(el.dataset.key));
+  el_delegate(container, 'tr.noplan-row', el => openCropDetail(el.dataset.crop));
 }
 
 function methodBadge(m){
   const cls = m==='DIRECT' ? 'method-direct' : 'method-other';
   return `<span class="badge ${cls}">${m}</span>`;
-}
-// Facility_Phase badge -- GH-PROP is a per-cohort phase, never a method
-function phaseBadge(c){
-  const ph = c.facility_phase;
-  if(!ph) return '—';
-  return `<span class="badge ${ph==='GH-PROP' ? 'method-ghprop' : (ph==='FIELD' ? 'method-direct' : 'method-other')}">${ph}</span>`;
 }
 function stageBadge(s){
   const map = { planned:'stage-planned', ghprop:'stage-ghprop', growing:'stage-growing', harvesting:'stage-harvesting', complete:'stage-complete', 'no-schedule':'stage-planned' };
@@ -916,20 +1085,22 @@ function el_delegate(container, selector, fn){
 
 // ============ ALERTS COMPUTATION ============
 function computeAlerts(){
+  // `level` (critical/warning/info) drives the alert-crop count; `kind` drives how the
+  // alerts are grouped on screen: window | coverage | noplan | data.
   const critical = [], warning = [], info = [];
   CROPS.forEach(crop => {
     if(crop.valid_waves === 0){
-      warning.push({ title: `${crop.crop}: no waves scheduled`, detail: `No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date · Status: ${crop.data_status}`, crop: crop.crop_id, level:'warning' });
+      warning.push({ kind:'noplan', title: `${crop.crop}: no scheduled waves`, detail: `No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date \u00b7 Status: ${crop.data_status}`, crop: crop.crop_id, level:'warning' });
     } else if(crop.has_window && crop.valid_waves < crop.min_waves){
-      critical.push({ title: `${crop.crop} has fewer than ${crop.min_waves} scheduled waves`, detail: `${crop.valid_waves} of ${crop.min_waves} minimum waves scheduled`, crop: crop.crop_id, level:'critical' });
+      critical.push({ kind:'coverage', title: `${crop.crop} has fewer than ${crop.min_waves} scheduled waves`, detail: `${crop.valid_waves} of ${crop.min_waves} minimum waves scheduled`, crop: crop.crop_id, level:'critical' });
     }
     if(crop.outside_window_waves > 0){
-      warning.push({ title: `${crop.crop}: ${crop.outside_window_waves} wave${crop.outside_window_waves>1?'s':''} scheduled outside the allowable planting window`, detail: `Window: ${crop.window_label}`, crop: crop.crop_id, level:'warning' });
+      warning.push({ kind:'window', title: `${crop.crop}: ${crop.outside_window_waves} wave${crop.outside_window_waves>1?'s':''} scheduled outside the allowable planting window`, detail: `Window: ${crop.window_label}`, crop: crop.crop_id, level:'warning' });
     }
     if(crop.window_kind==='NONE'){
-      info.push({ title: `${crop.crop}: no planting window on record`, detail: `Status: ${crop.data_status} — its waves cannot be window-checked`, crop: crop.crop_id, level:'info' });
+      info.push({ kind:'data', title: `${crop.crop}: no planting window on record`, detail: `Status: ${crop.data_status} \u2014 its waves cannot be window-checked`, crop: crop.crop_id, level:'info' });
     } else if(crop.window_kind==='UNPARSEABLE'){
-      info.push({ title: `${crop.crop}: planting window could not be read`, detail: `CROP_LIFECYCLE says "${crop.window_label}" — fix the text so waves can be checked`, crop: crop.crop_id, level:'info' });
+      info.push({ kind:'data', title: `${crop.crop}: planting window could not be read`, detail: `CROP_LIFECYCLE says "${crop.window_label}" \u2014 fix the text so waves can be checked`, crop: crop.crop_id, level:'info' });
     }
   });
   return { critical, warning, info };
@@ -947,23 +1118,8 @@ function alertItemHTML(a){
 function renderAlertsView(){
   const el = document.getElementById('view-alerts');
   const a = computeAlerts();
-  el.innerHTML = `
-    <div class="panel">
-      <div class="alert-group">
-        <h3 style="color:var(--red)">🔴 CRITICAL (${a.critical.length})</h3>
-        <div class="alert-list">${a.critical.length ? a.critical.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
-      </div>
-      <div class="alert-group">
-        <h3 style="color:var(--amber)">🟡 WARNING (${a.warning.length})</h3>
-        <div class="alert-list">${a.warning.length ? a.warning.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
-      </div>
-      <div class="alert-group">
-        <h3 style="color:var(--blue)">🔵 NEEDS DATA (${a.info.length})</h3>
-        <div class="alert-list">${a.info.length ? a.info.map(alertItemHTML).join('') : '<div class="empty">None.</div>'}</div>
-      </div>
-    </div>
-  `;
-  el_delegate(el, '.alert-item', e => openCropDetail(e.dataset.crop));
+  el.innerHTML = `<div class="panel">${alertsGroupedHTML(a, true)}</div>`;
+  wireAlertClicks(el);
   document.getElementById('alertNavCount').textContent = alertCropIds(a).length || '';
 }
 
@@ -1278,7 +1434,10 @@ function openCohortModal(key){
       <div class="field"><div class="k">WAVE</div><div class="v">${c.wave} of ${cropById[c.crop_id].total_slots}</div></div>
       <div class="field"><div class="k">DOB TYPE</div><div class="v" style="font-size:12.5px;">${c.dob_type}</div></div>
       <div class="field"><div class="k">PLANTING WINDOW CHECK</div><div class="v">${windowBadge(c.window_check, c.window_eval)}</div></div>
-      <div class="field"><div class="k">FACILITY PHASE</div><div class="v" style="font-size:12.5px;">${PHASE_LABEL[c.facility_phase] || c.facility_phase || '—'}</div></div>
+      <div class="field"><div class="k">PRODUCTION LOCATION</div><div class="v" style="font-size:12.5px;">${c.facility || '—'}</div></div>
+      <div class="field"><div class="k">PRODUCTION PHASE</div><div class="v" style="font-size:12.5px;">${prodPhase(c) === 'GH-FULL' ? 'GH-FULL (grown in greenhouse)' : (prodPhase(c) === 'FIELD' ? 'FIELD' : (prodPhase(c) || '—'))}</div></div>
+      <div class="field"><div class="k">PROPAGATION PATH</div><div class="v" style="font-size:12.5px;">${propPath(c) || 'None (direct / no propagation phase)'}</div></div>
+      ${prodAnomaly(c) ? `<div class="field" style="grid-column:1 / -1;"><div class="k">\u26a0 FACILITY CHECK</div><div class="v" style="font-size:12px;font-weight:500;color:var(--amber);">${prodAnomaly(c)}</div></div>` : ''}
       <div class="field"><div class="k">CURRENT STAGE</div><div class="v">${stageBadge(getStage(c, state.asOf))}</div></div>
       <div class="field"><div class="k">DAYS TO FIRST HARVEST</div><div class="v">${crop.days_to_harvest} days from DOB</div></div>
     </div>
