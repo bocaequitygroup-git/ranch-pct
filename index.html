@@ -1536,12 +1536,24 @@ function withheldCauseHTML_(line){
     + (nir ? line('NOT_IN_ROSTER example', esc_(nir.title || nir.detail || '')) : '');
 }
 function esc_(t){ return String(t).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
-// Nothing disappears silently: say how many scheduled field waves are not drawn, and why.
+// Nothing disappears silently: say how many scheduled field waves are not drawn THIS MONTH, and why.
+// Scoped to the visible month (same ym-prefix pattern as reviewNoticeHTML_) so the notice can't be
+// misread as a dataset-wide total sitting under one page — that total still lives in Alerts › Window
+// Exceptions, where offCalendarWaves() (unscoped, full dataset) is used for the crop-level summary.
 function offCalendarNoticeHTML_(){
-  const off = offCalendarWaves();
-  if(!off.length) return '';
+  const ym = state.calYear + '-' + String(state.calMonth + 1).padStart(2, '0');
+  const off = offCalendarWaves().filter(c => c.dob && c.dob.startsWith(ym))
+    .sort((a, b) => a.dob < b.dob ? -1 : a.dob > b.dob ? 1 : 0);
+  if(!off.length){
+    return `<div style="margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--text-dim)">No excluded field waves this month.</div>`;
+  }
   const crops = new Set(off.map(c => c.crop_id)).size;
-  return `<div style="margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--text-dim)">${off.length} scheduled field wave${off.length===1?'':'s'} (${crops} crop${crops===1?'':'s'}) not shown: planting date is outside the crop's allowable window. See Alerts \u203a Window Exceptions.</div>`;
+  const rows = off.map(c => `<div style="padding-left:14px">\u2014 ${c.crop_id} W${c.wave} (${fmtShortY(c.dob)}) \u2014 outside window</div>`).join('');
+  return `<div style="margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--text-dim)">
+    <div>${off.length} field wave${off.length===1?'':'s'} (${crops} crop${crops===1?'':'s'}) excluded this month: planting date is outside the crop's allowable window.</div>
+    ${rows}
+    <div style="margin-top:4px">See Alerts \u203a Window Exceptions for the full dataset total.</div>
+  </div>`;
 }
 // One line under the grid when the visible month contains flagged events, so the marker is explained.
 function reviewNoticeHTML_(){
