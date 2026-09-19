@@ -589,7 +589,7 @@ const STAGE_LABEL = { 'planned':'Planned','growing':'Growing','harvesting':'Harv
 function buildEvents(){
   const events = [];
   COHORTS.forEach(c => {
-    if(!c.dob) return;
+    if(!c.dob || !isFieldCohort(c)) return; // dataset boundary: field-only calendar
     // DOB is the planting date for every method — GH-PROP's transplant IS
     // this event, not a separate later one, so there's only ever one plant
     // event per cohort on the calendar.
@@ -614,15 +614,16 @@ function indexEvents(){
 function startOverdue(c, asOf){ return !!c.dob && c.pipeline_status === 'PLANNED' && c.dob < asOf; }
 
 function computeKPIs(asOf){
-  const scheduled = COHORTS.filter(c=>c.dob);
+  const scheduled = COHORTS.filter(c=>c.dob && isFieldCohort(c)); // dataset boundary: field-only
   const startsOverdue = scheduled.filter(c => startOverdue(c, asOf)).length;
   const activeCrops = new Set(scheduled.map(c=>c.crop_id)).size;
-  // Phase split (per cohort): FIELD + GH-PROP + GH-FULL = every scheduled wave
-  // Counted by PRODUCTION phase, so direct-field + field-via-GH-PROP + GH-FULL = every scheduled wave.
+  // Phase split (per cohort), FIELD dataset only: direct-field + field-via-GH-PROP = every
+  // scheduled wave on THIS dashboard. GH-FULL / GH-PROP-into-greenhouse never appear in
+  // `scheduled` at all (dataset boundary) -- greenhouseWaves below is informational only,
+  // computed from the full COHORTS set, and is not part of any field total.
   const fieldCohorts = scheduled.filter(c=>prodPhase(c)==='FIELD' && !propPath(c)).length;
   const ghCohorts = scheduled.filter(c=>prodPhase(c)==='FIELD' && propPath(c)).length;
-  const ghFullCohorts = scheduled.filter(c=>prodPhase(c)==='GH-FULL').length;
-  const ghFullPropagated = scheduled.filter(c=>prodPhase(c)==='GH-FULL' && propPath(c)).length;
+  const greenhouseWaves = COHORTS.filter(c => c.dob && !isFieldCohort(c)).length;
   const harvestingNow = scheduled.filter(c => getStage(c, asOf)==='harvesting').length;
   const ready7 = scheduled.filter(c => c.harvest_ready && c.harvest_ready > asOf && daysBetween(asOf,c.harvest_ready) <= 7).length;
   const ready14 = scheduled.filter(c => c.harvest_ready && daysBetween(asOf,c.harvest_ready) > 7 && daysBetween(asOf,c.harvest_ready) <= 14).length;
@@ -636,7 +637,7 @@ function computeKPIs(asOf){
   const al = computeAlerts();
   const alertCrops = alertCropIds(al).length;
   const missingWindow = CROPS.filter(c => c.window_kind==='NONE' || c.window_kind==='UNPARSEABLE').length;
-  return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, ghFullCohorts, ghFullPropagated, harvestingNow, ready7, ready14,
+  return { activeCrops, totalCohorts: scheduled.length, fieldCohorts, ghCohorts, greenhouseWaves, harvestingNow, ready7, ready14,
            outsideWindow, outsideCrops, recon, facilityChecks, noWaves, startsOverdue, alertCrops, missingWindow };
 }
 
@@ -669,12 +670,11 @@ function renderDashboard(){
 
   el.innerHTML = `
     <div class="kpi-groups">
-      ${kpiGroup('Production \u2014 every wave is counted once: field direct + field via GH-PROP + GH-FULL', 5, [
+      ${kpiGroup('Field Production \u2014 every wave is counted once: field direct + field via GH-PROP. Greenhouse (GH-FULL) is out of scope for this dashboard.', 4, [
         kpiCell(k.activeCrops,'Crops Scheduled','','activeCrops','of '+CROPS.length+' in crop master'),
-        kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years'),
+        kpiCell(k.totalCohorts,'Scheduled Waves','','totalCohorts','all planting years, field only'),
         kpiCell(k.fieldCohorts,'Field Production \u00b7 Direct','','fieldCohorts','sown directly in a field block'),
-        kpiCell(k.ghCohorts,'Field Production \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to a field block'),
-        kpiCell(k.ghFullCohorts,'Greenhouse Production \u00b7 GH-FULL','','ghFullCohorts',k.ghFullPropagated+' propagated first \u00b7 '+(k.ghFullCohorts-k.ghFullPropagated)+' sown in place')
+        kpiCell(k.ghCohorts,'Field Production \u00b7 via GH-PROP','info','ghCohorts','propagated in greenhouse, transplanted to a field block')
       ])}
       ${kpiGroup('Harvest', 3, [
         kpiCell(k.harvestingNow,'Harvesting Now','good','harvestingNow','first harvest \u2264 today \u2264 harvest end'),
@@ -736,7 +736,8 @@ function sourceLineHTML(){
     By planting year \u2014 ${fmt(SOURCE.cohorts_by_dob_year)}.
     By Pipeline_Status \u2014 ${fmt(SOURCE.cohorts_by_status)}.
     Crops: ${SOURCE.crops_with_waves} with waves of ${SOURCE.crop_count} in the crop master.
-    ${SUMMARY ? `<br><b>Planting-window check</b> \u2014 ${SUMMARY.cohorts_evaluated} of ${SUMMARY.cohorts_total} cohorts evaluated (${fmt(SUMMARY.by_window_eval)}).` : ''}
+    ${SUMMARY && SUMMARY.by_field_window_eval ? `<br><b>Field-window check</b> \u2014 ${SUMMARY.field_cohorts_evaluated} FIELD cohorts evaluated (${fmt(SUMMARY.by_field_window_eval)}). ${SUMMARY.greenhouse_cohorts_total} GREENHOUSE cohorts excluded (audit total across both: ${SUMMARY.cohorts_total}).`
+      : (SUMMARY ? `<br><b>Planting-window check</b> \u2014 ${SUMMARY.cohorts_evaluated} of ${SUMMARY.cohorts_total} cohorts evaluated (${fmt(SUMMARY.by_window_eval)}).` : '')}
     Viewing date is real today; dates in the table below carry their year.
   </div>`;
 }
@@ -745,29 +746,32 @@ function kpiGroup(label, cols, cells){
   return `<div class="kpi-group"><div class="kpi-group-label">${label}</div><div class="kpi-grid" style="--cols:${cols}">${cells.join('')}</div></div>`;
 }
 
-// Every scheduled wave lands in exactly one bucket, so the line always adds up.
+// FIELD rows only (scheduled = COHORTS filtered to isFieldCohort at the dataset boundary),
+// evaluated against the field window. Every field wave lands in exactly one bucket, so the
+// line always adds up. GH_FULL_EXEMPT no longer exists as a code: GH-FULL is removed from
+// this dataset entirely before window evaluation ever runs, so it can't show up here as an
+// "exemption" -- it simply isn't a candidate. The only remaining `ghOnly` case is the rare
+// anomaly of a field-destination row belonging to a crop with no field window at all.
 function windowRecon(scheduled){
   const n = code => scheduled.filter(c => c.window_eval === code).length;
   const r = { total: scheduled.length, inW: n('IN_WINDOW'), out: n('OUTSIDE_WINDOW'),
-              ghFull: n('GH_FULL_EXEMPT'), ghOnly: n('GREENHOUSE_ONLY'),
+              ghOnly: n('GREENHOUSE_ONLY'),
               noWin: n('NO_WINDOW'), bad: n('WINDOW_UNPARSEABLE') };
-  r.exempt = r.ghFull + r.ghOnly;
+  r.exempt = r.ghOnly;
   r.unchecked = r.noWin + r.bad;                 // a data gap, NOT an exemption
   r.other = r.total - (r.inW + r.out + r.exempt + r.unchecked);
   return r;
 }
 function reconHTML(k){
   const r = k.recon;
-  const parts = [];
-  if(r.ghFull) parts.push(r.ghFull + ' GH-FULL');
-  if(r.ghOnly) parts.push(r.ghOnly + ' greenhouse-only');
-  return `<div class="recon"><b>Field-window check</b> \u2014 ${r.total} waves:
+  return `<div class="recon"><b>Field-window check</b> \u2014 ${r.total} FIELD waves:
     <span class="ok">${r.inW} in window</span> \u00b7
     <span class="bad recon-link" data-kpi="outsideWindow">${r.out} outside window</span> \u00b7
-    <span class="recon-link" data-kpi="exemptWindow">${r.exempt} exempt from field-window check${parts.length ? ' ('+parts.join(' \u00b7 ')+')' : ''}</span>
+    ${r.exempt ? `<span class="recon-link" data-kpi="exemptWindow">\u26a0 ${r.exempt} on a crop with no field window (data anomaly)</span> \u00b7 ` : ''}
     ${r.unchecked ? ` \u00b7 <span class="bad recon-link" data-kpi="uncheckedWindow">${r.unchecked} unchecked \u2014 no usable window data</span>` : ''}
     ${r.other ? ` \u00b7 <span class="bad">${r.other} without an evaluation code</span>` : ''}
     ${k.facilityChecks ? `<br><span class="amb recon-link" data-kpi="facilityCheck">\u26a0 ${k.facilityChecks} wave${k.facilityChecks===1?'':'s'} with a facility / phase conflict</span>` : ''}
+    ${k.greenhouseWaves ? `<br><span style="color:var(--text-faint);">${k.greenhouseWaves} greenhouse (GH-FULL) wave${k.greenhouseWaves===1?'':'s'} excluded from this field dashboard \u2014 not counted above, not "exempt"</span>` : ''}
   </div>`;
 }
 
@@ -786,6 +790,16 @@ function prodPhase(c){
   if(isFieldFacility(c.facility)) return 'FIELD';
   if(isGhFacility(c.facility)) return 'GH-FULL';
   return c.facility_phase === 'GH-PROP' ? 'FIELD' : (c.facility_phase || null);
+}
+// THE dataset boundary for the FIELD dashboard. Prefers the backend's own
+// production_destination stamp (see ControlTowerAPI.gs ctDestination_); falls
+// back to prodPhase() for an older deployment. A GREENHOUSE-destination row
+// (GH-FULL, or GH-PROP that never leaves the greenhouse) is not a field row
+// and must never reach a field KPI, the pipeline, the calendar, or the
+// field-window recon -- it is excluded here, once, before any of those run.
+function isFieldCohort(c){
+  if(c.production_destination !== undefined) return c.production_destination === 'FIELD';
+  return prodPhase(c) !== 'GH-FULL';
 }
 function propPath(c){
   if(c.propagation_path !== undefined) return c.propagation_path;
@@ -834,7 +848,7 @@ function ghContinuityNote(crop){
   return { cls:'bad', short:'no', txt:'GH continuity ' + (g || 'not set') + ' \u2014 planting date must move' };
 }
 function windowExceptionRows(){
-  return COHORTS.filter(c => c.dob && c.window_check === 'OUTSIDE WINDOW').sort((a,b) => a.dob < b.dob ? -1 : a.dob > b.dob ? 1 : 0);
+  return COHORTS.filter(c => c.dob && isFieldCohort(c) && c.window_check === 'OUTSIDE WINDOW').sort((a,b) => a.dob < b.dob ? -1 : a.dob > b.dob ? 1 : 0);
 }
 
 function kpiCell(n, label, cls, key, sub){
@@ -845,7 +859,7 @@ function kpiCell(n, label, cls, key, sub){
 // current viewing date. Mirrors computeKPIs()'s own filters exactly so the
 // list always matches the count shown on the tile.
 function kpiDrilldown_(key, asOf){
-  const scheduled = COHORTS.filter(c=>c.dob);
+  const scheduled = COHORTS.filter(c=>c.dob && isFieldCohort(c)); // dataset boundary: field-only
   switch(key){
     case 'activeCrops':
       return { type:'crops', title:'Active Crops',
@@ -856,12 +870,10 @@ function kpiDrilldown_(key, asOf){
       return { type:'cohorts', title:'Field Production \u2014 direct in a field block', items: scheduled.filter(c=>prodPhase(c)==='FIELD' && !propPath(c)) };
     case 'ghCohorts':
       return { type:'cohorts', title:'Field Production \u2014 via GH-PROP (propagated in greenhouse, transplanted to a field block)', items: scheduled.filter(c=>prodPhase(c)==='FIELD' && propPath(c)) };
-    case 'ghFullCohorts':
-      return { type:'cohorts', title:'Greenhouse Production \u2014 GH-FULL', items: scheduled.filter(c=>prodPhase(c)==='GH-FULL') };
     case 'alertCrops':
       return { type:'crops', title:'Crops With Alerts', items: alertCropIds(computeAlerts()).map(id=>cropById[id]).filter(Boolean) };
     case 'exemptWindow':
-      return { type:'cohorts', title:'Waves Exempt From Field-Window Check', items: scheduled.filter(c=>c.window_eval==='GH_FULL_EXEMPT' || c.window_eval==='GREENHOUSE_ONLY') };
+      return { type:'cohorts', title:'Field Waves on a Crop With No Field Window (Data Anomaly)', items: scheduled.filter(c=>c.window_eval==='GREENHOUSE_ONLY') };
     case 'uncheckedWindow':
       return { type:'cohorts', title:'Waves Unchecked \u2014 No Usable Window Data', items: scheduled.filter(c=>c.window_eval==='NO_WINDOW' || c.window_eval==='WINDOW_UNPARSEABLE') };
     case 'facilityCheck':
@@ -952,7 +964,7 @@ function openKpiModal(key){
 
 function renderTodayPanel(){
   const asOf = state.asOf;
-  const scheduled = COHORTS.filter(c=>c.dob);
+  const scheduled = COHORTS.filter(c=>c.dob && isFieldCohort(c)); // dataset boundary: field-only
   const startGH = scheduled.filter(c => c.in_gh_prop && c.gh_prop_start === asOf);
   const transplantToday = scheduled.filter(c => c.in_gh_prop && c.field_date === asOf);
   const fieldPlantToday = scheduled.filter(c => !c.in_gh_prop && c.facility_phase !== 'GH-FULL' && c.dob === asOf);
@@ -989,9 +1001,9 @@ function renderPipelineTable(){
   const asOf = state.asOf;
   // Next Wave DOB = the same crop's next planting date after this wave's DOB (blank for its last wave).
   const dobsByCrop = {};
-  COHORTS.forEach(c => { if(c.dob) (dobsByCrop[c.crop_id] = dobsByCrop[c.crop_id] || []).push(c.dob); });
+  COHORTS.forEach(c => { if(c.dob && isFieldCohort(c)) (dobsByCrop[c.crop_id] = dobsByCrop[c.crop_id] || []).push(c.dob); }); // dataset boundary: field-only
   Object.keys(dobsByCrop).forEach(k => dobsByCrop[k].sort());
-  let rows = COHORTS.filter(c => c.dob).map(c => ({...c, next_dob: (dobsByCrop[c.crop_id].find(d => d > c.dob) || null), harvest_end_from_sheet: !!c.harvest_end, stage: getStage(c, asOf), daysToHarvest: c.harvest_ready ? daysBetween(asOf, c.harvest_ready) : null, harvest_end: harvestEndFor(c) }));
+  let rows = COHORTS.filter(c => c.dob && isFieldCohort(c)).map(c => ({...c, next_dob: (dobsByCrop[c.crop_id].find(d => d > c.dob) || null), harvest_end_from_sheet: !!c.harvest_end, stage: getStage(c, asOf), daysToHarvest: c.harvest_ready ? daysBetween(asOf, c.harvest_ready) : null, harvest_end: harvestEndFor(c) }));
   // CURRENT pipeline = what is physically in production or about to start as of the viewing date:
   //   harvesting + growing (always), planned waves whose start is inside the horizon (this includes any
   //   start date that has already passed), and waves that finished harvesting within the last 14 days.
@@ -1136,7 +1148,7 @@ function stageBadge(s){
 function windowBadge(w, ev){
   if(w==='IN WINDOW') return `<span class="badge win-in">IN WINDOW</span>`;
   if(w==='OUTSIDE WINDOW') return `<span class="badge win-out">OUTSIDE</span>`;
-  if(ev==='GH_FULL_EXEMPT') return `<span class="badge win-none" title="Grown inside the greenhouse (continuity) \u2014 not a field planting">GH-FULL</span>`;
+  if(ev==='GREENHOUSE') return `<span class="badge win-none" title="Greenhouse-destination wave \u2014 not part of the field dataset, not field-window checked">GREENHOUSE</span>`;
   if(ev==='GREENHOUSE_ONLY') return `<span class="badge win-none" title="Greenhouse-only crop \u2014 no field window">GH ONLY</span>`;
   if(ev==='WINDOW_UNPARSEABLE') return `<span class="badge win-out" title="Window text could not be read">CHECK WINDOW</span>`;
   if(ev==='NO_WINDOW') return `<span class="badge win-none">NO WINDOW</span>`;
@@ -1159,6 +1171,7 @@ function computeAlerts(){
   // alerts are grouped on screen: window | coverage | noplan | data.
   const critical = [], warning = [], info = [];
   CROPS.forEach(crop => {
+    if(crop.window_kind === 'GREENHOUSE_ONLY') return; // no field wave is expected here -- not a field-dashboard concern
     if(crop.valid_waves === 0){
       warning.push({ kind:'noplan', title: `${crop.crop}: no scheduled waves`, detail: `No COHORT_PRODUCTION row with a Transplant_Date or Sow_Date \u00b7 Status: ${crop.data_status}`, crop: crop.crop_id, level:'warning' });
     } else if(crop.has_window && crop.valid_waves < crop.min_waves){
@@ -1431,7 +1444,7 @@ function openCohortModal(key){
     .sort((a,b) => a.wave - b.wave);
   const waveRows = cropWaves.map(w => {
     const harvestStatus = w.window_check === 'IN WINDOW' ? 'Valid Harvest'
-      : (w.window_check ? 'Out of Window / Invalid' : (w.window_eval==='GH_FULL_EXEMPT' ? 'Greenhouse (n/a)' : '—'));
+      : (w.window_check ? 'Out of Window / Invalid' : (w.window_eval==='GREENHOUSE' ? 'Greenhouse (n/a)' : '—'));
     return `
       <tr class="${w.wave === c.wave ? 'current-wave' : ''}">
         <td>${w.wave}</td>
